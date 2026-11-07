@@ -33,6 +33,16 @@ class Session(ctx: Context) {
         get() = p.getString("pending_state", "").orEmpty()
         set(v) { p.edit().putString("pending_state", v).apply() }
 
+    /** fileId của ảnh vừa upload — dùng cho điểm danh kèm ảnh. */
+    var lastUploadedFileId: String
+        get() = p.getString("last_file_id", "").orEmpty()
+        set(v) { p.edit().putString("last_file_id", v).apply() }
+
+    /** URL công khai của ảnh vừa upload (chỉ để hiển thị). */
+    var lastUploadedFileUrl: String
+        get() = p.getString("last_file_url", "").orEmpty()
+        set(v) { p.edit().putString("last_file_url", v).apply() }
+
     fun isLoggedIn(): Boolean = accessToken.isNotBlank()
     fun clear() { p.edit().clear().apply() }
 }

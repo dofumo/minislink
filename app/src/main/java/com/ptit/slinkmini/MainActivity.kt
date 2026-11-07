@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.text.InputType
+import android.util.Log
 import android.view.View
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
@@ -35,17 +36,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tokenIn: EditText
     private lateinit var uploadResult: TextView
 
-    // Version khớp app gốc hiện tại
+    // Version app gốc: 2.3.9 / 80075
     private val appVersionName = "2.3.9"
     private val appVersionCode = "80075"
 
-    // Trạng thái cho từng luồng
     private enum class Flow { NONE, CAMERA_SCAN, IMAGE_QR }
     private var flow = Flow.NONE
 
-    // Bruteforce
     @Volatile private var bruteCancel = false
     private var bruteThread: Thread? = null
+
+    private companion object {
+        const val TAG_PROBE = "SLINK_PROBE"
+    }
 
     // ========== Launchers ==========
     private val scanLauncher = registerForActivityResult(ScanContract()) { r ->
@@ -115,7 +118,6 @@ class MainActivity : AppCompatActivity() {
             text = "PTIT S-Link Mini"; textSize = 22f; setPadding(0, 0, 0, 24)
         })
 
-        // ---- Login ----
         loginBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         loginBox.addView(Button(this).apply {
             text = "Đăng nhập qua SSO"; setOnClickListener { startSso() }
@@ -125,7 +127,6 @@ class MainActivity : AppCompatActivity() {
         })
         root.addView(loginBox)
 
-        // ---- Home ----
         homeBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; visibility = View.GONE
         }
@@ -145,7 +146,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { startImageQr() }
         })
 
-        // ===== Khối 2: Điểm danh không ảnh (dự phòng) =====
+        // ===== Khối 2: Điểm danh không ảnh =====
         homeBox.addView(sectionHeader("Điểm danh không ảnh"))
         manualQr = EditText(this).apply { hint = "Dán chuỗi QR (dự phòng)" }
         homeBox.addView(manualQr)
@@ -179,7 +180,11 @@ class MainActivity : AppCompatActivity() {
             }
         })
         homeBox.addView(Button(this).apply {
-            text = "🔍 Bruteforce mã (cảnh báo: có thể bị ban)"
+            text = "🔍 Probe API endpoints (tìm mã sự kiện)"
+            setOnClickListener { probeEndpoints() }
+        })
+        homeBox.addView(Button(this).apply {
+            text = "🔢 Bruteforce mã (cảnh báo: có thể bị ban)"
             setOnClickListener { showBruteforceDialog() }
         })
 
@@ -228,9 +233,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun sectionHeader(text: String): TextView = TextView(this).apply {
-        this.text = text
-        textSize = 16f
-        setPadding(0, 24, 0, 8)
+        this.text = text; textSize = 16f; setPadding(0, 24, 0, 8)
     }
 
     private fun refreshUi() {
@@ -553,7 +556,73 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { uploadResult.text = "Lỗi: ${e.message}" }
     }
 
-    // ========== BRUTEFORCE (utility, cảnh báo) ==========
+    // ========== PROBE ENDPOINTS (tìm mã sự kiện) ==========
+    private fun probeEndpoints() {
+        val log = StringBuilder()
+        log.append("=== PROBE API ENDPOINTS ===\n")
+        log.append("Version: $appVersionName / $appVersionCode\n")
+        log.append("Partition: ${session.partitionCode.ifBlank { "(empty)" }}\n\n")
+
+        val endpoints = listOf(
+            "GET" to "/slink/su-kien/user/from?page=1&limit=20",
+            "GET" to "/slink/sv-su-kien/me/page?page=1&limit=20",
+            "GET" to "/slink/su-kien/me?page=1&limit=20",
+            "GET" to "/slink/sv-su-kien/me?page=1&limit=20"
+        )
+
+        probeNext(endpoints, 0, log, status)
+    }
+
+    private fun probeNext(
+        endpoints: List<Pair<String, String>>,
+        idx: Int,
+        log: StringBuilder,
+        statusView: TextView
+    ) {
+        if (idx >= endpoints.size) {
+            runOnUiThread {
+                log.append("\n=== DONE ===\n")
+                statusView.text = log.toString()
+            }
+            return
+        }
+        val (method, path) = endpoints[idx]
+        val url = Config.API_URL.trimEnd('/') + "/" + path.trimStart('/')
+        val tag = "[${idx + 1}/${endpoints.size}] $method $path"
+
+        Log.d(TAG_PROBE, "→ $tag")
+        runOnUiThread {
+            log.append("⏳ $tag\n")
+            statusView.text = log.toString()
+        }
+
+        val cb: (Boolean, String) -> Unit = { ok, resp ->
+            val preview = resp.take(1500)
+            Log.d(TAG_PROBE, "← $tag ok=$ok resp=${resp.take(500)}")
+
+            runOnUiThread {
+                log.append("────────────────────\n")
+                log.append("$tag\n")
+                log.append("ok=$ok\n")
+                log.append("resp:\n$preview\n\n")
+                statusView.text = log.toString()
+
+                // Nếu response chứa "ma" hoặc "maDiemDanh" → log đặc biệt
+                if (resp.contains("\"ma\"", true) ||
+                    resp.contains("maDiemDanh", true) ||
+                    resp.contains("checkInCode", true)) {
+                    Log.d(TAG_PROBE, "🎯 CÓ THỂ CHỨA MÃ: $tag")
+                    log.append("🎯 RESPONSE CHỨA FIELD MÃ — kiểm tra kỹ!\n")
+                }
+            }
+            probeNext(endpoints, idx + 1, log, statusView)
+        }
+
+        if (method == "GET") Api.get(url, authHeaders(), cb)
+        else Api.postJson(url, "{}", authHeaders(), cb)
+    }
+
+    // ========== BRUTEFORCE ==========
     private fun showBruteforceDialog() {
         if (bruteThread?.isAlive == true) {
             AlertDialog.Builder(this)
@@ -614,7 +683,7 @@ class MainActivity : AppCompatActivity() {
         val total = end - start + 1
         status.text = "Bruteforce $start..$end ($total mã), delay ${delayMs}ms"
 
-        bruteThread = Thread {
+        val t = Thread {
             var tried = 0
             var i = start
             while (i <= end && !bruteCancel) {
@@ -664,6 +733,8 @@ class MainActivity : AppCompatActivity() {
                 status.text = if (bruteCancel) "Đã dừng bruteforce (thử $tried mã)"
                               else "Hoàn tất (thử $tried mã, không tìm thấy)"
             }
-        }.start()
+        }
+        bruteThread = t
+        t.start()
     }
 }

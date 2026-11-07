@@ -1,0 +1,6 @@
+-keep class okhttp3.** { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-keep class com.journeyapps.** { *; }
+-keep class com.google.zxing.** { *; }
+-keepattributes *Annotation*

@@ -23,6 +23,9 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 
 class MainActivity : AppCompatActivity() {
 
@@ -36,10 +39,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tokenIn: EditText
     private lateinit var uploadResult: TextView
 
-    // ============================================================
-    // VERSION — 80064 là bản server CHẤP NHẬN cho POST /qr.
-    // Probe xác nhận: GET endpoint không chặn version, chỉ POST /qr.
-    // ============================================================
     private val appVersionName = "2.3.6"
     private val appVersionCode = "80064"
 
@@ -55,6 +54,7 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         const val TAG = "SLINK"
         const val TAG_PROBE = "SLINK_PROBE"
+        const val TAG_EVENTS = "SLINK_EVENTS"
     }
 
     // ========== Launchers ==========
@@ -72,9 +72,7 @@ class MainActivity : AppCompatActivity() {
                 status.text = "✅ Đã quét QR\nĐang điểm danh…"
                 doCheckIn(content)
             }
-            Flow.PHOTO_CHECKIN -> {
-                processPhotoCheckinQr(content)
-            }
+            Flow.PHOTO_CHECKIN -> processPhotoCheckinQr(content)
             else -> doCheckIn(content)
         }
     }
@@ -86,18 +84,12 @@ class MainActivity : AppCompatActivity() {
         flow = Flow.NONE
         val ma = pendingPhotoMa
         pendingPhotoMa = ""
-        Log.d(TAG, "pickImage result: mode=$mode uri=$uri ma=$ma")
-        if (uri == null) {
-            status.text = "Đã huỷ chọn ảnh"
-            return@registerForActivityResult
-        }
+        Log.d(TAG, "pickImage: mode=$mode uri=$uri ma=$ma")
+        if (uri == null) { status.text = "Đã huỷ chọn ảnh"; return@registerForActivityResult }
         when (mode) {
             Flow.IMAGE_QR -> decodeQrThenCheckin(uri)
             Flow.PHOTO_CHECKIN -> {
-                if (ma.isBlank()) {
-                    status.text = "Không có mã để điểm danh kèm ảnh"
-                    return@registerForActivityResult
-                }
+                if (ma.isBlank()) { status.text = "Không có mã"; return@registerForActivityResult }
                 doUploadAndCheckin(uri, ma)
             }
             else -> doUploadOnly(uri)
@@ -112,10 +104,9 @@ class MainActivity : AppCompatActivity() {
         refreshUi()
         if (session.isLoggedIn()) {
             preparePartition()
-            // Fallback ngay: server đã xác nhận partition = PTIT trong probe
             if (session.partitionCode.isBlank()) {
                 session.partitionCode = "PTIT"
-                Log.d(TAG, "partition fallback → PTIT (from probe)")
+                Log.d(TAG, "partition fallback → PTIT")
             }
         }
     }
@@ -125,7 +116,6 @@ class MainActivity : AppCompatActivity() {
         handleIntent(intent)
     }
 
-    // ========== SSO ==========
     private fun handleIntent(intent: Intent) {
         val data = intent.data ?: return
         if (data.scheme == "ptit.auth" && data.host == "SignIn") {
@@ -166,14 +156,25 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL; visibility = View.GONE
         }
 
-        // ===== Khối 1: Điểm danh có ảnh (1 nút) =====
+        // ===== Khối mới: Xem sự kiện =====
+        homeBox.addView(sectionHeader("📅 Sự kiện"))
+        homeBox.addView(Button(this).apply {
+            text = "📅 Xem sự kiện đang diễn ra"
+            setOnClickListener { showOngoingEvents() }
+        })
+        homeBox.addView(Button(this).apply {
+            text = "📋 Xem sự kiện đã tham gia"
+            setOnClickListener { showJoinedEvents() }
+        })
+
+        // ===== Điểm danh có ảnh =====
         homeBox.addView(sectionHeader("Điểm danh kèm ảnh xác thực"))
         homeBox.addView(Button(this).apply {
             text = "📷 Điểm danh kèm ảnh (1 nút)"
             setOnClickListener { startPhotoCheckinOneTap() }
         })
 
-        // ===== Khối 2: Điểm danh không ảnh =====
+        // ===== Điểm danh không ảnh =====
         homeBox.addView(sectionHeader("Điểm danh không ảnh (nhanh)"))
         homeBox.addView(Button(this).apply {
             text = "📷 Quét QR bằng camera"
@@ -197,10 +198,10 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        // ===== Khối 3: Debug / Test =====
+        // ===== Debug =====
         homeBox.addView(sectionHeader("Debug & Test"))
         homeBox.addView(Button(this).apply {
-            text = "🔬 Test check-in variants (8 biến thể)"
+            text = "🔬 Test check-in variants"
             setOnClickListener { runVariantsWithInput() }
         })
         homeBox.addView(Button(this).apply {
@@ -212,7 +213,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { showBruteforceDialog() }
         })
 
-        // ===== Khối 4: Tiện ích =====
+        // ===== Tiện ích =====
         homeBox.addView(sectionHeader("Tiện ích"))
         homeBox.addView(Button(this).apply {
             text = "📤 Upload ảnh (không điểm danh)"
@@ -234,7 +235,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        // ===== Khối 5: Tài khoản =====
+        // ===== Tài khoản =====
         homeBox.addView(sectionHeader("Tài khoản"))
         homeBox.addView(Button(this).apply {
             text = "Settings"; setOnClickListener { showSettings() }
@@ -261,8 +262,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 val t = tokenIn.text.toString().trim()
                 if (t.isNotBlank()) session.accessToken = t
-                val p = partIn.text.toString().trim()
-                session.partitionCode = p.ifBlank { "PTIT" }
+                session.partitionCode = partIn.text.toString().trim().ifBlank { "PTIT" }
                 status.text = "Đã lưu"; refreshUi()
                 if (session.isLoggedIn()) preparePartition()
             }
@@ -362,7 +362,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ========== Partition (có fallback PTIT) ==========
+    // ========== Partition ==========
     private fun preparePartition() {
         val fromJwt = partitionFromJwt()
         if (fromJwt.isNotBlank()) { session.partitionCode = fromJwt; return }
@@ -379,10 +379,7 @@ class MainActivity : AppCompatActivity() {
                     if (code.isNotBlank()) session.partitionCode = code
                 }
             } catch (_: Exception) {}
-            if (session.partitionCode.isBlank()) {
-                session.partitionCode = "PTIT"
-                Log.d(TAG, "partition fallback → PTIT (probe confirmed)")
-            }
+            if (session.partitionCode.isBlank()) session.partitionCode = "PTIT"
         }
     }
 
@@ -452,17 +449,378 @@ class MainActivity : AppCompatActivity() {
 
     private fun isVersionBlocked(resp: String): Boolean {
         val r = resp.lowercase()
-        return r.contains("update phiên bản") ||
-               r.contains("update phien ban") ||
-               r.contains("update app")
+        return r.contains("update phiên bản") || r.contains("update phien ban")
     }
 
-    // ========== FLOW 1: Điểm danh kèm ảnh (1 nút) ==========
+    // ============================================================
+    // ============ SỰ KIỆN ĐANG DIỄN RA (MỚI) ============
+    // ============================================================
+
+    /** Probe 14 endpoint để tìm endpoint list sự kiện. */
+    private fun showOngoingEvents() {
+        val endpoints = listOf(
+            "/slink/su-kien/page?page=1&limit=50",
+            "/slink/su-kien?page=1&limit=50",
+            "/slink/su-kien/all?page=1&limit=50",
+            "/slink/su-kien/list?page=1&limit=50",
+            "/slink/su-kien/active?page=1&limit=50",
+            "/slink/su-kien/current?page=1&limit=50",
+            "/slink/su-kien/ongoing?page=1&limit=50",
+            "/slink/su-kien/public?page=1&limit=50",
+            "/slink/su-kien/public/page?page=1&limit=50",
+            "/slink/su-kien/dang-dien-ra?page=1&limit=50",
+            "/slink/su-kien/user/page?page=1&limit=50",
+            "/slink/sv-su-kien/page?page=1&limit=50",
+            "/slink/sv-su-kien/all?page=1&limit=50",
+            "/slink/sv-su-kien/list?page=1&limit=50",
+            "/slink/sv-su-kien/active?page=1&limit=50",
+            "/slink/dot-cham-diem/page?page=1&limit=50",
+            "/slink/dot-cham-diem/active?page=1&limit=50"
+        )
+        val log = StringBuilder("=== TÌM ENDPOINT SỰ KIỆN ĐANG DIỄN RA ===\n")
+        status.text = log.toString()
+        probeEventEndpoints(endpoints, 0, log)
+    }
+
+    private fun probeEventEndpoints(
+        endpoints: List<String>, idx: Int, log: StringBuilder
+    ) {
+        if (idx >= endpoints.size) {
+            runOnUiThread {
+                log.append("\n❌ Không endpoint nào trả danh sách sự kiện.\n")
+                log.append("→ Cần sniff mitmproxy app gốc khi mở tab 'Sự kiện'.\n")
+                log.append("→ Hoặc dùng 'Xem sự kiện đã tham gia' (endpoint /sv-su-kien/me/page đã verified).")
+                status.text = log.toString()
+            }
+            return
+        }
+        val path = endpoints[idx]
+        val url = Config.API_URL.trimEnd('/') + path
+        Log.d(TAG_EVENTS, "probe: GET $url")
+        runOnUiThread {
+            log.append("⏳ $path\n")
+            status.text = log.toString()
+        }
+        Api.get(url, authHeaders()) { ok, resp ->
+            Log.d(TAG_EVENTS, "probe: $path ok=$ok resp=${resp.take(200)}")
+            val isSuccess = ok && !resp.contains("\"success\":false")
+            val hasEvents = resp.contains("\"result\"") ||
+                            resp.contains("\"items\"") ||
+                            resp.contains("\"list\"") ||
+                            resp.trimStart().startsWith("[")
+            runOnUiThread {
+                log.append("  ok=$ok  ${resp.take(120)}\n")
+                status.text = log.toString()
+            }
+            if (isSuccess && hasEvents) {
+                runOnUiThread {
+                    log.append("\n✅ TÌM THẤY: $path\n")
+                    status.text = log.toString()
+                    parseAndShowEvents(resp, path)
+                }
+                return@get
+            }
+            probeEventEndpoints(endpoints, idx + 1, log)
+        }
+    }
+
+    /** Parse response → hiện dialog danh sách sự kiện. */
+    private fun parseAndShowEvents(resp: String, endpoint: String) {
+        val events = mutableListOf<JSONObject>()
+        try {
+            val trimmed = resp.trim()
+            if (trimmed.startsWith("[")) {
+                val arr = JSONArray(trimmed)
+                for (i in 0 until arr.length()) events.add(arr.getJSONObject(i))
+            } else {
+                val j = JSONObject(trimmed)
+                val data = j.opt("data")
+                when (data) {
+                    is JSONObject -> {
+                        val result = data.optJSONArray("result")
+                            ?: data.optJSONArray("items")
+                            ?: data.optJSONArray("list")
+                        if (result != null) {
+                            for (i in 0 until result.length()) events.add(result.getJSONObject(i))
+                        }
+                    }
+                    is JSONArray -> {
+                        for (i in 0 until data.length()) events.add(data.getJSONObject(i))
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG_EVENTS, "parse fail", e)
+            status.text = "Endpoint $endpoint OK nhưng parse JSON fail:\n${resp.take(2000)}"
+            return
+        }
+
+        if (events.isEmpty()) {
+            status.text = "Endpoint $endpoint OK nhưng không có event.\n${resp.take(1500)}"
+            return
+        }
+
+        Log.d(TAG_EVENTS, "found ${events.size} events from $endpoint")
+        val ongoing = events.filter { isEventOngoing(it) }
+        val display = if (ongoing.isNotEmpty()) ongoing else events
+        val title = if (ongoing.isNotEmpty())
+            "Sự kiện đang diễn ra (${ongoing.size}/${events.size})"
+        else "Tất cả sự kiện (${events.size}) — không filter được thời gian"
+
+        showEventListDialog(display, title, endpoint)
+    }
+
+    /** Hiện dialog danh sách sự kiện, mỗi event là 1 nút. */
+    private fun showEventListDialog(
+        events: List<JSONObject>, title: String, endpoint: String
+    ) {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24, 16, 24, 16)
+        }
+
+        // Header info
+        container.addView(TextView(this).apply {
+            text = "Endpoint: $endpoint\n${events.size} sự kiện"
+            textSize = 11f
+            setPadding(0, 0, 0, 16)
+        })
+
+        for ((i, event) in events.withIndex()) {
+            val name = extractEventName(event)
+            val id = extractEventId(event)
+            val time = extractEventTime(event)
+            val codes = extractCheckInCodes(event)
+
+            val btn = Button(this).apply {
+                text = buildString {
+                    append("📌 $name\n")
+                    if (time.isNotBlank()) append("⏰ $time\n")
+                    if (id.isNotBlank()) append("🆔 $id\n")
+                    if (codes.isNotEmpty()) append("🔑 Mã: ${codes.joinToString(", ")}\n")
+                }
+                textSize = 12f
+                setOnClickListener {
+                    showEventDetails(event, codes)
+                }
+            }
+            container.addView(btn)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(ScrollView(this).apply { addView(container) })
+            .setPositiveButton("Đóng", null)
+            .setNeutralButton("Copy tất cả") { _, _ ->
+                val all = events.joinToString("\n\n") { it.toString(2) }
+                (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                    .setPrimaryClip(ClipData.newPlainText("events", all))
+                Toast.makeText(this, "Đã copy ${events.size} sự kiện", Toast.LENGTH_SHORT).show()
+            }
+            .show()
+    }
+
+    /** Dialog chi tiết 1 event + nút check-in nếu có mã. */
+    private fun showEventDetails(event: JSONObject, codes: List<String>) {
+        val details = try { event.toString(2) } catch (_: Exception) { event.toString() }
+        val ma = codes.firstOrNull()
+
+        val builder = AlertDialog.Builder(this)
+            .setTitle("Chi tiết sự kiện")
+            .setMessage(details)
+            .setPositiveButton("Đóng", null)
+            .setNeutralButton("Copy JSON") { _, _ ->
+                (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                    .setPrimaryClip(ClipData.newPlainText("event", details))
+                Toast.makeText(this, "Đã copy", Toast.LENGTH_SHORT).show()
+            }
+
+        if (!ma.isNullOrBlank()) {
+            builder.setNegativeButton("🔑 Điểm danh với mã $ma") { _, _ ->
+                doCheckInWithMa(ma)
+            }
+        }
+        builder.show()
+    }
+
+    // ========== Extract helpers ==========
+
+    private fun extractEventName(e: JSONObject): String {
+        for (f in listOf("ten", "tenSuKien", "tenHoatDong", "name", "title")) {
+            val v = e.optString(f)
+            if (v.isNotBlank()) return v
+        }
+        return "(không tên)"
+    }
+
+    private fun extractEventId(e: JSONObject): String {
+        for (f in listOf("_id", "id", "idSuKien")) {
+            val v = e.optString(f)
+            if (v.isNotBlank()) return v
+        }
+        return ""
+    }
+
+    private fun extractEventTime(e: JSONObject): String {
+        val start = findTimeField(e, listOf(
+            "thoiGianBatDau", "ngayBatDau", "batDau", "thoiGianDienRa", "startTime", "startDate"
+        ))
+        val end = findTimeField(e, listOf(
+            "thoiGianKetThuc", "ngayKetThuc", "ketThuc", "endTime", "endDate"
+        ))
+        return when {
+            start.isNotBlank() && end.isNotBlank() -> "$start → $end"
+            start.isNotBlank() -> "từ $start"
+            end.isNotBlank() -> "đến $end"
+            else -> ""
+        }
+    }
+
+    private fun findTimeField(e: JSONObject, names: List<String>): String {
+        for (f in names) {
+            val v = e.optString(f)
+            if (v.isNotBlank()) return v.take(19).replace("T", " ")
+        }
+        return ""
+    }
+
+    private fun isEventOngoing(e: JSONObject): Boolean {
+        val now = System.currentTimeMillis()
+        val start = parseTime(e, listOf(
+            "thoiGianBatDau", "ngayBatDau", "batDau", "thoiGianDienRa", "startTime", "startDate"
+        ))
+        val end = parseTime(e, listOf(
+            "thoiGianKetThuc", "ngayKetThuc", "ketThuc", "endTime", "endDate"
+        ))
+        return when {
+            start > 0 && end > 0 -> now in start..end
+            start > 0 -> now >= start
+            else -> false
+        }
+    }
+
+    private fun parseTime(e: JSONObject, names: List<String>): Long {
+        for (f in names) {
+            val v = e.optString(f)
+            if (v.isNotBlank()) {
+                val t = parseIsoTime(v)
+                if (t > 0) return t
+            }
+        }
+        return 0L
+    }
+
+    private fun parseIsoTime(s: String): Long {
+        val formats = listOf(
+            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+            "yyyy-MM-dd'T'HH:mm:ssXXX",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd"
+        )
+        for (fmt in formats) {
+            try {
+                val sdf = SimpleDateFormat(fmt, Locale.US)
+                sdf.timeZone = TimeZone.getTimeZone("UTC")
+                val d = sdf.parse(s) ?: continue
+                return d.time
+            } catch (_: Exception) {}
+        }
+        return 0L
+    }
+
+    /**
+     * Trích mã điểm danh từ event.
+     * Thử nested arrays như danhSachDotChamDiem, dotChamDiem, sessions.
+     * Cũng thử trực tiếp field maDiemDanh, ma, code trên event.
+     */
+    private fun extractCheckInCodes(e: JSONObject): List<String> {
+        val codes = mutableListOf<String>()
+        // Direct fields
+        for (f in listOf("maDiemDanh", "ma", "code", "checkInCode")) {
+            val v = e.optString(f)
+            if (v.matches(Regex("\\d{4,10}"))) codes.add(v)
+        }
+        // Nested arrays
+        for (f in listOf("danhSachDotChamDiem", "dotChamDiem", "dotChamDiems", "sessions", "checkInSessions")) {
+            val arr = e.optJSONArray(f) ?: continue
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                for (k in listOf("maDiemDanh", "ma", "code", "checkInCode")) {
+                    val v = o.optString(k)
+                    if (v.matches(Regex("\\d{4,10}"))) { codes.add(v); break }
+                }
+            }
+        }
+        return codes.distinct()
+    }
+
+    // ========== Xem sự kiện đã tham gia (endpoint verified) ==========
+
+    private fun showJoinedEvents() {
+        status.text = "Đang lấy sự kiện đã tham gia…"
+        getWithAuth("/slink/sv-su-kien/me/page?page=1&limit=50") { ok, resp ->
+            runOnUiThread {
+                if (!ok) { status.text = "Lỗi: $resp"; return@runOnUiThread }
+                try {
+                    val arr = JSONObject(resp).getJSONObject("data").getJSONArray("result")
+                    val events = mutableListOf<JSONObject>()
+                    for (i in 0 until arr.length()) events.add(arr.getJSONObject(i))
+                    if (events.isEmpty()) {
+                        status.text = "Chưa tham gia sự kiện nào"
+                        return@runOnUiThread
+                    }
+                    showJoinedEventsDialog(events)
+                } catch (e: Exception) {
+                    status.text = "Parse lỗi: ${e.message}\n${resp.take(500)}"
+                }
+            }
+        }
+    }
+
+    private fun showJoinedEventsDialog(events: List<JSONObject>) {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24, 16, 24, 16)
+        }
+        for (event in events) {
+            val tenSv = event.optString("tenSv", "?")
+            val idSuKien = event.optString("idSuKien", "?")
+            val thoiGian = event.optString("thoiGianCheckIn", "").take(19).replace("T", " ")
+            val idDot = event.optString("idDotChamDiem", "")
+            val loaiQr = event.optString("loaiQR", "")
+
+            container.addView(TextView(this).apply {
+                text = "📌 $idSuKien\n" +
+                       "   SV: $tenSv\n" +
+                       "   Check-in: $thoiGian\n" +
+                       "   Đợt: $idDot | Loại: $loaiQr"
+                textSize = 12f
+                setPadding(0, 12, 0, 12)
+                setTextIsSelectable(true)
+            })
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Đã tham gia (${events.size})")
+            .setView(ScrollView(this).apply { addView(container) })
+            .setPositiveButton("Đóng", null)
+            .setNeutralButton("Copy") { _, _ ->
+                val all = events.joinToString("\n\n") { it.toString(2) }
+                (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                    .setPrimaryClip(ClipData.newPlainText("joined", all))
+            }
+            .show()
+    }
+
+    // ============================================================
+    // ============ CÁC FLOW ĐIỂM DANH (giữ nguyên) ============
+    // ============================================================
+
     private fun startPhotoCheckinOneTap() {
         val qrText = manualQr.text.toString().trim()
-        if (qrText.isNotBlank()) {
-            processPhotoCheckinQr(qrText)
-        } else {
+        if (qrText.isNotBlank()) processPhotoCheckinQr(qrText)
+        else {
             flow = Flow.PHOTO_CHECKIN
             status.text = "Bước 1/2: Quét QR sự kiện"
             startScan()
@@ -473,28 +831,23 @@ class MainActivity : AppCompatActivity() {
         val parsed = QrParser.parse(qr)
         if (parsed == null) { status.text = "QR không hợp lệ:\n$qr"; return }
         if (parsed.module != "SU_KIEN" || parsed.action != "CHECK_IN") {
-            status.text = "Chỉ hỗ trợ SU_KIEN|CHECK_IN\nNhận: ${parsed.module}|${parsed.action}"
-            return
+            status.text = "Chỉ hỗ trợ SU_KIEN|CHECK_IN"; return
         }
         val ma = try { JSONObject(parsed.data).optString("maDiemDanh") }
                  catch (_: Exception) { "" }
         if (ma.isBlank()) { status.text = "QR thiếu maDiemDanh"; return }
-        lastMa = ma
-        lastQr = qr
-        pendingPhotoMa = ma
+        lastMa = ma; lastQr = qr; pendingPhotoMa = ma
         flow = Flow.PHOTO_CHECKIN
         status.text = "Bước 2/2: Chọn ảnh xác thực\nma=$ma"
         pickImageLauncher.launch("image/*")
     }
 
-    // ========== FLOW 2: Quét QR (không ảnh) ==========
     private fun startCameraScan() {
         flow = Flow.CAMERA_SCAN
         status.text = "Đưa QR sự kiện vào khung"
         startScan()
     }
 
-    // ========== FLOW 3: Nhập mã ==========
     private fun showManualDialog() {
         val input = EditText(this).apply {
             hint = "Mã điểm danh (VD: 153591)"
@@ -514,7 +867,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // ========== FLOW 4: Trích mã từ ảnh QR ==========
     private fun startImageQr() {
         flow = Flow.IMAGE_QR
         status.text = "Chọn ảnh có chứa QR sự kiện"
@@ -528,14 +880,12 @@ class MainActivity : AppCompatActivity() {
             if (bytes == null || bytes.isEmpty()) { status.text = "Không đọc được ảnh"; return }
             val decodedQr = decodeQrFromBytes(bytes)
             if (decodedQr == null) {
-                status.text = "❌ Không tìm thấy QR trong ảnh.\nThử ảnh rõ hơn hoặc dùng 'Nhập mã'."
+                status.text = "❌ Không tìm thấy QR trong ảnh."
                 return
             }
-            Log.d(TAG, "decoded QR from image: ${decodedQr.take(120)}")
             doCheckIn(decodedQr)
         } catch (e: Exception) {
             status.text = "Lỗi đọc ảnh: ${e.message}"
-            Log.e(TAG, "decodeQrThenCheckin", e)
         }
     }
 
@@ -548,26 +898,22 @@ class MainActivity : AppCompatActivity() {
             val source = RGBLuminanceSource(w, h, pixels)
             val binary = BinaryBitmap(HybridBinarizer(source))
             MultiFormatReader().decode(binary).text
-        } catch (e: Exception) {
-            Log.w(TAG, "decodeQrFromBytes fail: ${e.message}"); null
-        }
+        } catch (_: Exception) { null }
     }
 
-    // ========== ĐIỂM DANH ==========
     private fun doCheckInWithMa(ma: String) {
         lastMa = ma
         val body = JSONObject()
             .put("ma", ma)
             .put("loaiQR", "Tham gia")
             .toString()
-        status.text = "Đang check-in sự kiện (không ảnh)…\nma=$ma\nPartition=${session.partitionCode.ifBlank { "(empty)" }}"
+        status.text = "Đang check-in sự kiện…\nma=$ma\nPartition=${session.partitionCode}"
         postWithAuth("/slink/sv-su-kien/qr", body) { ok, resp ->
             runOnUiThread {
                 if (ok && resp.contains("\"success\":true")) {
                     status.text = "✅ Điểm danh thành công\n$resp"
                 } else if (isVersionBlocked(resp)) {
-                    status.text = "❌ Server từ chối (v$appVersionCode)\n$resp\n\n" +
-                        "→ Thử nút '🔬 Test check-in variants' để tìm body/header đúng."
+                    status.text = "❌ Version blocked\n$resp"
                 } else {
                     status.text = "❌ Lỗi: $resp\n\nma=$ma"
                 }
@@ -580,7 +926,6 @@ class MainActivity : AppCompatActivity() {
         val parsed = QrParser.parse(qr)
         if (parsed == null) { status.text = "QR không hợp lệ:\n$qr"; return }
         status.text = "Đang xử lý: ${parsed.module}|${parsed.action}"
-        Log.d(TAG, "doCheckIn: module=${parsed.module} action=${parsed.action}")
         when {
             parsed.module == "SU_KIEN" && parsed.action == "CHECK_IN" -> {
                 try {
@@ -602,11 +947,10 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            else -> status.text = "Chưa hỗ trợ: ${parsed.module}|${parsed.action}\n$qr"
+            else -> status.text = "Chưa hỗ trợ: ${parsed.module}|${parsed.action}"
         }
     }
 
-    // ========== UPLOAD + CHECKIN ==========
     private fun doUploadAndCheckin(uri: Uri, ma: String) {
         status.text = "Bước 1/2: Đọc ảnh…\nma=$ma"
         try {
@@ -625,56 +969,29 @@ class MainActivity : AppCompatActivity() {
             status.text = "Bước 1/2: Upload ảnh (${bytes.size / 1024} KB)…\nma=$ma"
             val url = Config.API_URL.trimEnd('/') + "/slink/file"
             val headers = authHeaders().toMutableMap().apply { remove("Content-Type") }
-            Log.d(TAG, "upload: url=$url size=${bytes.size} name=$displayName")
 
             Api.uploadFile(url, bytes, displayName, mime, headers, "file") { ok, resp ->
-                Log.d(TAG, "upload result: ok=$ok resp=${resp.take(400)}")
                 runOnUiThread {
-                    if (!ok) {
-                        if (isVersionBlocked(resp)) {
-                            status.text = "❌ Upload bị chặn version $appVersionCode\n$resp"
-                        } else {
-                            status.text = "❌ Upload thất bại\n$resp\n\nma=$ma"
-                        }
-                        return@runOnUiThread
-                    }
+                    if (!ok) { status.text = "❌ Upload thất bại\n$resp"; return@runOnUiThread }
                     val fileId = extractFileId(resp)
                     if (fileId.isBlank()) {
-                        status.text = "⚠️ Upload OK nhưng không tìm được fileId.\n\n" +
-                            "Response nguyên văn:\n$resp\n\n" +
-                            "→ Copy khối này gửi để fix field name."
+                        status.text = "⚠️ Upload OK nhưng không có fileId\n$resp"
                         return@runOnUiThread
                     }
-                    session.lastUploadedFileId = fileId
                     status.text = "Upload OK (fileId=$fileId)\nBước 2/2: Đang điểm danh…"
-                    Log.d(TAG, "check-in: ma=$ma fileId=$fileId")
-
                     val body = JSONObject()
-                        .put("ma", ma)
-                        .put("loaiQR", "Tham gia")
-                        .put("fileId", fileId)
-                        .toString()
+                        .put("ma", ma).put("loaiQR", "Tham gia").put("fileId", fileId).toString()
                     postWithAuth("/slink/sv-su-kien/qr", body) { ok2, resp2 ->
                         runOnUiThread {
-                            if (ok2 && resp2.contains("\"success\":true")) {
+                            if (ok2 && resp2.contains("\"success\":true"))
                                 status.text = "✅ Điểm danh kèm ảnh thành công\n$resp2"
-                                session.lastUploadedFileId = ""
-                            } else if (isVersionBlocked(resp2)) {
-                                status.text = "❌ Server từ chối (v$appVersionCode)\n$resp2\n\n" +
-                                    "→ Thử nút '🔬 Test check-in variants'."
-                            } else {
-                                status.text = "❌ Điểm danh lỗi: $resp2\n\n" +
-                                    "ma=$ma\nfileId=$fileId\n\n" +
-                                    "→ Nếu báo thiếu field ảnh, thử variants."
-                            }
+                            else
+                                status.text = "❌ Lỗi: $resp2\nma=$ma\nfileId=$fileId"
                         }
                     }
                 }
             }
-        } catch (e: Exception) {
-            status.text = "Lỗi upload: ${e.message}"
-            Log.e(TAG, "doUploadAndCheckin", e)
-        }
+        } catch (e: Exception) { status.text = "Lỗi: ${e.message}" }
     }
 
     private fun extractFileId(resp: String): String {
@@ -684,182 +1001,15 @@ class MainActivity : AppCompatActivity() {
             fromData?.optJSONObject("file")?.optString("_id").orEmpty().ifBlank {
                 fromData?.optJSONObject("file")?.optString("id").orEmpty().ifBlank {
                     fromData?.optString("_id").orEmpty().ifBlank {
-                        fromData?.optString("id").orEmpty().ifBlank {
-                            j.optString("fileId").ifBlank {
-                                j.optJSONObject("file")?.optString("_id").orEmpty()
-                            }
+                        j.optString("fileId").ifBlank {
+                            j.optJSONObject("file")?.optString("_id").orEmpty()
                         }
                     }
                 }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "extractFileId fail: ${e.message}"); ""
-        }
+        } catch (_: Exception) { "" }
     }
 
-    // ========== VARIANT TESTING ==========
-    private fun runVariantsWithInput() {
-        val existing = lastMa
-        if (existing.isNotBlank()) {
-            testCheckInVariants(existing)
-            return
-        }
-        val input = EditText(this).apply {
-            hint = "Mã để test (VD: 153591)"
-            inputType = InputType.TYPE_CLASS_NUMBER
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Test check-in variants")
-            .setMessage("Nhập mã điểm danh. Sẽ thử 8 biến thể body/header để tìm cái server chấp nhận.")
-            .setView(input)
-            .setPositiveButton("Chạy") { _, _ ->
-                val m = input.text.toString().trim()
-                if (m.isNotBlank()) testCheckInVariants(m)
-            }
-            .setNegativeButton("Huỷ", null)
-            .show()
-    }
-
-    private fun testCheckInVariants(ma: String) {
-        status.text = "Đang lấy danh sách sự kiện đã tham gia…"
-        getWithAuth("/slink/sv-su-kien/me/page?page=1&limit=1") { ok, resp ->
-            runOnUiThread {
-                var idSuKien = ""
-                var idDotChamDiem = ""
-                var cauHinhMinhChungId = ""
-                if (ok) try {
-                    val arr = JSONObject(resp).getJSONObject("data").getJSONArray("result")
-                    if (arr.length() > 0) {
-                        val o = arr.getJSONObject(0)
-                        idSuKien = o.optString("idSuKien")
-                        idDotChamDiem = o.optString("idDotChamDiem")
-                        cauHinhMinhChungId = o.optString("cauHinhMinhChungId")
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "parse events fail: ${e.message}")
-                }
-
-                Log.d(TAG, "events: idSuKien=$idSuKien idDot=$idDotChamDiem cauHinh=$cauHinhMinhChungId")
-
-                val variants = mutableListOf<Triple<String, String, Map<String, String>>>()
-
-                // A: body tối thiểu + partition header
-                variants.add(Triple(
-                    "A_minimal",
-                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia").toString(),
-                    mapOf("x-data-partition-code" to "PTIT")
-                ))
-                // B: partition trong body
-                variants.add(Triple(
-                    "B_body_partition",
-                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia")
-                        .put("dataPartitionCode", "PTIT").toString(),
-                    mapOf("x-data-partition-code" to "PTIT")
-                ))
-                // C: có idSuKien
-                if (idSuKien.isNotBlank()) {
-                    variants.add(Triple(
-                        "C_with_idSuKien",
-                        JSONObject().put("ma", ma).put("loaiQR", "Tham gia")
-                            .put("idSuKien", idSuKien).toString(),
-                        mapOf("x-data-partition-code" to "PTIT")
-                    ))
-                }
-                // D: full body
-                if (idSuKien.isNotBlank() && idDotChamDiem.isNotBlank()) {
-                    variants.add(Triple(
-                        "D_full",
-                        JSONObject().put("ma", ma).put("loaiQR", "Tham gia")
-                            .put("idSuKien", idSuKien)
-                            .put("idDotChamDiem", idDotChamDiem)
-                            .put("cauHinhMinhChungId", cauHinhMinhChungId)
-                            .put("dataPartitionCode", "PTIT").toString(),
-                        mapOf("x-data-partition-code" to "PTIT")
-                    ))
-                }
-                // E: version 80075 + PTIT
-                variants.add(Triple(
-                    "E_v80075",
-                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia").toString(),
-                    mapOf("x-data-partition-code" to "PTIT",
-                          "X-App-Version" to "2.3.9",
-                          "X-App-VersionCode" to "80075")
-                ))
-                // F: no version headers
-                variants.add(Triple(
-                    "F_no_version",
-                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia").toString(),
-                    mapOf("x-data-partition-code" to "PTIT")
-                ))
-                // G: UA app gốc 2.3.9
-                variants.add(Triple(
-                    "G_ua_239",
-                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia").toString(),
-                    mapOf("x-data-partition-code" to "PTIT",
-                          "User-Agent" to "PTIT-S-Link/2.3.9 (Android; 80075)")
-                ))
-                // H: loaiQR tiếng Anh
-                variants.add(Triple(
-                    "H_loaiQR_JOIN",
-                    JSONObject().put("ma", ma).put("loaiQR", "JOIN").toString(),
-                    mapOf("x-data-partition-code" to "PTIT")
-                ))
-
-                runVariants(variants, 0, StringBuilder().apply {
-                    append("=== VARIANTS TEST ===\n")
-                    append("ma=$ma\n")
-                    append("v=$appVersionName/$appVersionCode\n")
-                    append("partition=${session.partitionCode}\n")
-                    append("idSuKien=$idSuKien\n\n")
-                }, ma)
-            }
-        }
-    }
-
-    private fun runVariants(
-        variants: List<Triple<String, String, Map<String, String>>>,
-        idx: Int,
-        log: StringBuilder,
-        ma: String
-    ) {
-        if (idx >= variants.size) {
-            runOnUiThread {
-                log.append("\n=== DONE ===\n")
-                status.text = log.toString()
-            }
-            return
-        }
-        val (name, body, overrides) = variants[idx]
-        val url = Config.API_URL.trimEnd('/') + "/slink/sv-su-kien/qr"
-        val headers = authHeaders().toMutableMap().apply { putAll(overrides) }
-        // Variant F: xoá hết header version
-        if (name == "F_no_version") {
-            headers.remove("X-App-Version"); headers.remove("X-App-VersionCode")
-            headers.remove("X-Client-Version"); headers.remove("X-Client-VersionCode")
-            headers.remove("X-Version"); headers.remove("App-Version")
-        }
-
-        Log.d(TAG, "variant $name: body=$body")
-        runOnUiThread {
-            log.append("⏳ $name\n")
-            status.text = log.toString()
-        }
-
-        Api.postJson(url, body, headers) { ok, resp ->
-            val preview = resp.take(400)
-            Log.d(TAG, "variant $name ← ok=$ok resp=$preview")
-            val isSuccess = ok && resp.contains("\"success\":true")
-            runOnUiThread {
-                log.append("────────────────────\n")
-                log.append("$name  ok=$ok" + if (isSuccess) "  🎯" else "" + "\n")
-                log.append("resp: $preview\n\n")
-                status.text = log.toString()
-            }
-            runVariants(variants, idx + 1, log, ma)
-        }
-    }
-
-    // ========== Quét QR ==========
     private fun startScan() {
         val o = ScanOptions()
         o.setDesiredBarcodeFormats(ScanOptions.QR_CODE)
@@ -882,7 +1032,6 @@ class MainActivity : AppCompatActivity() {
         return data
     }
 
-    // ========== Upload ảnh không điểm danh ==========
     private fun doUploadOnly(uri: Uri) {
         uploadResult.text = "Đang đọc ảnh…"
         try {
@@ -906,69 +1055,133 @@ class MainActivity : AppCompatActivity() {
                     val fileId = extractFileId(resp)
                     if (fileId.isNotBlank()) session.lastUploadedFileId = fileId
                     uploadResult.text = "✅ Upload OK" +
-                        (if (fileId.isNotBlank()) " (fileId=$fileId)" else "") +
-                        "\n$resp"
+                        (if (fileId.isNotBlank()) " (fileId=$fileId)" else "") + "\n$resp"
                 }
             }
         } catch (e: Exception) { uploadResult.text = "Lỗi: ${e.message}" }
     }
 
+    // ========== VARIANTS TEST ==========
+    private fun runVariantsWithInput() {
+        val existing = lastMa
+        if (existing.isNotBlank()) { testCheckInVariants(existing); return }
+        val input = EditText(this).apply {
+            hint = "Mã để test"; inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Test check-in variants")
+            .setView(input)
+            .setPositiveButton("Chạy") { _, _ ->
+                val m = input.text.toString().trim()
+                if (m.isNotBlank()) testCheckInVariants(m)
+            }
+            .setNegativeButton("Huỷ", null)
+            .show()
+    }
+
+    private fun testCheckInVariants(ma: String) {
+        status.text = "Đang lấy events để test variants…"
+        getWithAuth("/slink/sv-su-kien/me/page?page=1&limit=1") { ok, resp ->
+            runOnUiThread {
+                var idSuKien = ""
+                var idDotChamDiem = ""
+                if (ok) try {
+                    val arr = JSONObject(resp).getJSONObject("data").getJSONArray("result")
+                    if (arr.length() > 0) {
+                        val o = arr.getJSONObject(0)
+                        idSuKien = o.optString("idSuKien")
+                        idDotChamDiem = o.optString("idDotChamDiem")
+                    }
+                } catch (_: Exception) {}
+
+                val variants = mutableListOf<Triple<String, String, Map<String, String>>>()
+                variants.add(Triple("A_minimal",
+                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia").toString(),
+                    mapOf("x-data-partition-code" to "PTIT")))
+                variants.add(Triple("B_body_partition",
+                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia")
+                        .put("dataPartitionCode", "PTIT").toString(),
+                    mapOf("x-data-partition-code" to "PTIT")))
+                if (idSuKien.isNotBlank()) variants.add(Triple("C_with_idSuKien",
+                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia")
+                        .put("idSuKien", idSuKien).toString(),
+                    mapOf("x-data-partition-code" to "PTIT")))
+                if (idDotChamDiem.isNotBlank()) variants.add(Triple("D_with_idDot",
+                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia")
+                        .put("idDotChamDiem", idDotChamDiem).toString(),
+                    mapOf("x-data-partition-code" to "PTIT")))
+                variants.add(Triple("I_dangky",
+                    JSONObject().put("ma", ma).put("loaiQR", "Đăng ký").toString(),
+                    mapOf("x-data-partition-code" to "PTIT")))
+                if (idSuKien.isNotBlank()) variants.add(Triple("J_dangky_with_id",
+                    JSONObject().put("ma", ma).put("loaiQR", "Đăng ký")
+                        .put("idSuKien", idSuKien).toString(),
+                    mapOf("x-data-partition-code" to "PTIT")))
+
+                val log = StringBuilder().apply {
+                    append("=== VARIANTS ===\nma=$ma\nidSuKien=$idSuKien\nidDot=$idDotChamDiem\n\n")
+                }
+                runVariants(variants, 0, log)
+            }
+        }
+    }
+
+    private fun runVariants(
+        variants: List<Triple<String, String, Map<String, String>>>,
+        idx: Int, log: StringBuilder
+    ) {
+        if (idx >= variants.size) {
+            runOnUiThread { log.append("\n=== DONE ===\n"); status.text = log.toString() }
+            return
+        }
+        val (name, body, overrides) = variants[idx]
+        val url = Config.API_URL.trimEnd('/') + "/slink/sv-su-kien/qr"
+        val headers = authHeaders().toMutableMap().apply { putAll(overrides) }
+        runOnUiThread { log.append("⏳ $name\n"); status.text = log.toString() }
+        Api.postJson(url, body, headers) { ok, resp ->
+            val ok2 = ok && resp.contains("\"success\":true")
+            runOnUiThread {
+                log.append("$name  ok=$ok" + if (ok2) "  🎯" else "" + "\n")
+                log.append("  ${resp.take(200)}\n\n")
+                status.text = log.toString()
+            }
+            runVariants(variants, idx + 1, log)
+        }
+    }
+
     // ========== PROBE ==========
     private fun probeEndpoints() {
-        val log = StringBuilder()
-        log.append("=== PROBE API ENDPOINTS ===\n")
-        log.append("Version: $appVersionName / $appVersionCode\n")
-        log.append("Partition: ${session.partitionCode.ifBlank { "(empty)" }}\n\n")
-
+        val log = StringBuilder("=== PROBE ===\n")
+        log.append("v=$appVersionName/$appVersionCode\n")
+        log.append("partition=${session.partitionCode}\n\n")
         val endpoints = listOf(
             "GET" to "/slink/sv-su-kien/me/page?page=1&limit=1",
             "GET" to "/slink/sv-su-kien/me?page=1&limit=1",
             "GET" to "/slink/su-kien/user/from?page=1&limit=20",
             "GET" to "/slink/su-kien/me?page=1&limit=20"
         )
-
-        probeNext(endpoints, 0, log, status)
+        probeNext(endpoints, 0, log)
     }
 
     private fun probeNext(
-        endpoints: List<Pair<String, String>>,
-        idx: Int,
-        log: StringBuilder,
-        statusView: TextView
+        endpoints: List<Pair<String, String>>, idx: Int, log: StringBuilder
     ) {
         if (idx >= endpoints.size) {
-            runOnUiThread {
-                log.append("\n=== DONE ===\n")
-                statusView.text = log.toString()
-            }
+            runOnUiThread { log.append("\n=== DONE ===\n"); status.text = log.toString() }
             return
         }
         val (method, path) = endpoints[idx]
         val url = Config.API_URL.trimEnd('/') + "/" + path.trimStart('/')
         val tag = "[${idx + 1}/${endpoints.size}] $method $path"
-
-        Log.d(TAG_PROBE, "→ $tag (v$appVersionCode)")
-        runOnUiThread {
-            log.append("⏳ $tag\n")
-            statusView.text = log.toString()
-        }
-
+        runOnUiThread { log.append("⏳ $tag\n"); status.text = log.toString() }
         val cb: (Boolean, String) -> Unit = { ok, resp ->
-            val preview = resp.take(1500)
-            Log.d(TAG_PROBE, "← $tag ok=$ok resp=${resp.take(500)}")
             runOnUiThread {
-                log.append("────────────────────\n")
-                log.append("$tag\n")
-                log.append("ok=$ok\n")
-                if (isVersionBlocked(resp)) {
-                    log.append("⚠️ VERSION BLOCKED\n")
-                }
-                log.append("resp:\n$preview\n\n")
-                statusView.text = log.toString()
+                log.append("────────────────────\n$tag\nok=$ok\n")
+                log.append("resp:\n${resp.take(1500)}\n\n")
+                status.text = log.toString()
             }
-            probeNext(endpoints, idx + 1, log, statusView)
+            probeNext(endpoints, idx + 1, log)
         }
-
         if (method == "GET") Api.get(url, authHeaders(), cb)
         else Api.postJson(url, "{}", authHeaders(), cb)
     }
@@ -976,121 +1189,83 @@ class MainActivity : AppCompatActivity() {
     // ========== BRUTEFORCE ==========
     private fun showBruteforceDialog() {
         if (bruteThread?.isAlive == true) {
-            AlertDialog.Builder(this)
-                .setTitle("Bruteforce đang chạy")
-                .setMessage("Bạn muốn dừng?")
-                .setPositiveButton("Dừng") { _, _ ->
-                    bruteCancel = true
-                    status.text = "Đã yêu cầu dừng bruteforce…"
-                }
-                .setNegativeButton("Tiếp tục", null)
-                .show()
+            AlertDialog.Builder(this).setTitle("Đang chạy")
+                .setMessage("Dừng?")
+                .setPositiveButton("Dừng") { _, _ -> bruteCancel = true }
+                .setNegativeButton("Tiếp", null).show()
             return
         }
-
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 16, 48, 0)
         }
         val startIn = EditText(this).apply {
-            hint = "Từ (mặc định 150000)"; inputType = InputType.TYPE_CLASS_NUMBER
+            hint = "Từ (150000)"; inputType = InputType.TYPE_CLASS_NUMBER
         }
         val endIn = EditText(this).apply {
-            hint = "Đến (mặc định 160000)"; inputType = InputType.TYPE_CLASS_NUMBER
+            hint = "Đến (160000)"; inputType = InputType.TYPE_CLASS_NUMBER
         }
         val delayIn = EditText(this).apply {
-            hint = "Delay ms (mặc định 100 = ~10 req/s)"
-            inputType = InputType.TYPE_CLASS_NUMBER
+            hint = "Delay ms (100)"; inputType = InputType.TYPE_CLASS_NUMBER
         }
-        container.addView(startIn)
-        container.addView(endIn)
-        container.addView(delayIn)
+        container.addView(startIn); container.addView(endIn); container.addView(delayIn)
         container.addView(TextView(this).apply {
-            text = "⚠️ Bruteforce 1M mã sẽ mất hàng giờ và gần như chắc chắn bị ban tài khoản.\n" +
-                   "Khuyến nghị: chạy range hẹp 150000-160000 trước (10K mã, ~17 phút ở 100ms)."
-            textSize = 11f
-            setPadding(0, 16, 0, 0)
+            text = "⚠️ Bruteforce có thể bị ban. Chỉ chạy range hẹp khi có sự kiện thật."
+            textSize = 11f; setPadding(0, 16, 0, 0)
         })
-
-        AlertDialog.Builder(this)
-            .setTitle("Bruteforce mã điểm danh")
+        AlertDialog.Builder(this).setTitle("Bruteforce")
             .setView(container)
             .setPositiveButton("Chạy") { _, _ ->
                 val start = startIn.text.toString().trim().toIntOrNull() ?: 150000
                 val end = endIn.text.toString().trim().toIntOrNull() ?: 160000
                 val delay = delayIn.text.toString().trim().toLongOrNull() ?: 100L
                 if (start < 0 || end > 999999 || start > end) {
-                    status.text = "Range không hợp lệ (0–999999, start ≤ end)"
+                    status.text = "Range không hợp lệ"
                     return@setPositiveButton
                 }
                 startBruteforce(start, end, delay)
             }
-            .setNegativeButton("Huỷ", null)
-            .show()
+            .setNegativeButton("Huỷ", null).show()
     }
 
     private fun startBruteforce(start: Int, end: Int, delayMs: Long) {
         bruteCancel = false
         val total = end - start + 1
-        status.text = "Bruteforce $start..$end ($total mã), delay ${delayMs}ms"
-
+        status.text = "Bruteforce $start..$end ($total mã)"
         val t = Thread {
-            var tried = 0
-            var i = start
+            var tried = 0; var i = start
             while (i <= end && !bruteCancel) {
                 val ma = i.toString().padStart(6, '0')
                 val latch = java.util.concurrent.CountDownLatch(1)
-                var success = false
-                var respCopy = "TIMEOUT"
-
-                postWithAuth(
-                    "/slink/sv-su-kien/qr",
-                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia").toString()
-                ) { ok, resp ->
-                    success = ok
-                    respCopy = resp
-                    latch.countDown()
+                var success = false; var respCopy = "TIMEOUT"
+                postWithAuth("/slink/sv-su-kien/qr",
+                    JSONObject().put("ma", ma).put("loaiQR", "Tham gia").toString()) { ok, resp ->
+                    success = ok; respCopy = resp; latch.countDown()
                 }
-
                 latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
                 tried++
-
-                val finalMa = ma
-                val finalSuccess = success
-                val finalResp = respCopy
-                val finalTried = tried
+                val fm = ma; val fs = success; val fr = respCopy; val ft = tried
                 runOnUiThread {
-                    status.text = "[$finalTried/$total] ma=$finalMa\n" +
-                        if (finalSuccess) "🎯 SUCCESS: ${finalResp.take(300)}"
-                        else "resp: ${finalResp.take(150)}"
+                    status.text = "[$ft/$total] ma=$fm\n" +
+                        if (fs && fr.contains("\"success\":true")) "🎯 $fr"
+                        else fr.take(150)
                 }
-
-                if (success && finalResp.contains("\"success\":true")) {
-                    runOnUiThread { status.text = "🎯 Tìm thấy ma=$finalMa\n$finalResp" }
+                if (success && respCopy.contains("\"success\":true")) {
+                    runOnUiThread { status.text = "🎯 Tìm thấy ma=$fm\n$respCopy" }
                     return@Thread
                 }
-                if (isVersionBlocked(finalResp)) {
-                    runOnUiThread {
-                        status.text = "⚠️ Version blocked tại ma=$finalMa\n$finalResp"
-                    }
+                if (respCopy.contains("429") || respCopy.contains("rate limit", true)) {
+                    runOnUiThread { status.text = "⚠️ Rate limit tại ma=$fm" }
                     return@Thread
                 }
-                if (finalResp.contains("429") || finalResp.contains("Too Many", true) ||
-                    finalResp.contains("rate limit", true)) {
-                    runOnUiThread { status.text = "⚠️ Rate limit tại ma=$finalMa\nĐã dừng." }
-                    return@Thread
-                }
-
                 try { Thread.sleep(delayMs) } catch (_: InterruptedException) { return@Thread }
                 i++
             }
-
             runOnUiThread {
-                status.text = if (bruteCancel) "Đã dừng bruteforce (thử $tried mã)"
-                              else "Hoàn tất (thử $tried mã, không tìm thấy)"
+                status.text = if (bruteCancel) "Đã dừng ($tried mã)"
+                              else "Xong ($tried mã, không thấy)"
             }
         }
-        bruteThread = t
-        t.start()
+        bruteThread = t; t.start()
     }
 }

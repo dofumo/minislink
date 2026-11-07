@@ -2,6 +2,7 @@ package com.ptit.slinkmini
 
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
@@ -39,7 +40,8 @@ object Api {
     }
 
     private fun cb(onResult: (Boolean, String) -> Unit) = object : Callback {
-        override fun onFailure(call: Call, e: IOException) = onResult(false, e.message ?: "network error")
+        override fun onFailure(call: Call, e: IOException) =
+            onResult(false, e.message ?: "network error")
         override fun onResponse(call: Call, r: Response) {
             val body = r.body?.string() ?: ""
             onResult(r.isSuccessful, body)

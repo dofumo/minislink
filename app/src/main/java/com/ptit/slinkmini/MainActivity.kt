@@ -35,27 +35,20 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tokenIn: EditText
     private lateinit var uploadResult: TextView
 
-    private val appVersionName = "2.3.6"
-    private val appVersionCode = "80064"
+    // Version khớp app gốc cao nhất hiện tại: 2.3.9 / 80067
+    private val appVersionName = "2.3.9"
+    private val appVersionCode = "80067"
 
-    private enum class PendingFlow { NONE, CAMERA_THEN_PHOTO, IMAGE_QR_SELF, MANUAL_THEN_PHOTO }
+    private enum class PendingFlow { NONE, CAMERA_QR, IMAGE_QR_SELF }
     private var pendingFlow = PendingFlow.NONE
-    private var pendingQr: String? = null
-    private var pendingCode: String? = null
 
     // ========== Launchers ==========
     private val scanLauncher = registerForActivityResult(ScanContract()) { r ->
         val content = r.contents
         when (pendingFlow) {
-            PendingFlow.CAMERA_THEN_PHOTO -> {
-                if (content == null) {
-                    pendingFlow = PendingFlow.NONE
-                    pendingQr = null
-                } else {
-                    pendingQr = content
-                    status.text = "✅ Đã quét QR\nBước 2/2: Chọn ảnh xác thực"
-                    pickImageLauncher.launch("image/*")
-                }
+            PendingFlow.CAMERA_QR -> {
+                pendingFlow = PendingFlow.NONE
+                if (content != null) doCheckIn(content)
             }
             PendingFlow.NONE -> {
                 if (content != null) doCheckIn(content)
@@ -68,44 +61,15 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         val flow = pendingFlow
-        val qr = pendingQr
-        val code = pendingCode
         pendingFlow = PendingFlow.NONE
-        pendingQr = null
-        pendingCode = null
-
         when (flow) {
             PendingFlow.NONE -> {
                 if (uri != null) doUploadOnly(uri)
             }
-            PendingFlow.CAMERA_THEN_PHOTO -> {
-                if (uri == null || qr == null) {
-                    status.text = "Đã huỷ"
-                } else {
-                    val parsed = QrParser.parse(qr)
-                    if (parsed == null) {
-                        status.text = "QR không hợp lệ"; return@registerForActivityResult
-                    }
-                    if (parsed.module != "SU_KIEN" || parsed.action != "CHECK_IN") {
-                        status.text = "Chỉ hỗ trợ SU_KIEN|CHECK_IN cho flow có ảnh"
-                        return@registerForActivityResult
-                    }
-                    val ma = try { JSONObject(parsed.data).optString("maDiemDanh") }
-                              catch (_: Exception) { "" }
-                    if (ma.isBlank()) {
-                        status.text = "QR thiếu maDiemDanh"; return@registerForActivityResult
-                    }
-                    uploadAndCheckin(uri, ma)
-                }
-            }
             PendingFlow.IMAGE_QR_SELF -> {
-                if (uri == null) { status.text = "Đã huỷ" }
-                else decodeQrThenUploadAndCheckin(uri)
+                if (uri != null) decodeQrThenCheckin(uri)
             }
-            PendingFlow.MANUAL_THEN_PHOTO -> {
-                if (uri == null || code == null) { status.text = "Đã huỷ" }
-                else uploadAndCheckin(uri, code)
-            }
+            else -> { /* không xảy ra */ }
         }
     }
 
@@ -163,7 +127,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL; visibility = View.GONE
         }
         homeBox.addView(TextView(this).apply {
-            text = "Điểm danh kèm ảnh"; textSize = 16f; setPadding(0, 0, 0, 8)
+            text = "Điểm danh sự kiện"; textSize = 16f; setPadding(0, 0, 0, 8)
         })
         homeBox.addView(Button(this).apply {
             text = "📷 Quét QR bằng camera"
@@ -376,7 +340,7 @@ class MainActivity : AppCompatActivity() {
         }
     } catch (_: Exception) { "" }
 
-    // ========== Headers ==========
+    // ========== Headers (version 2.3.9) ==========
     private fun authHeaders(): Map<String, String> {
         val h = mutableMapOf(
             "Authorization" to "Bearer ${session.accessToken}",
@@ -421,158 +385,71 @@ class MainActivity : AppCompatActivity() {
 
     // ========== 3 FLOW CHÍNH ==========
 
-    /** Flow 1: Quét QR bằng camera → upload ảnh → điểm danh. */
+    /** Flow 1: Quét QR bằng camera → điểm danh. */
     private fun flowCamera() {
-        pendingFlow = PendingFlow.CAMERA_THEN_PHOTO
-        pendingQr = null
-        status.text = "Bước 1/2: Quét QR sự kiện"
+        pendingFlow = PendingFlow.CAMERA_QR
+        status.text = "Quét QR sự kiện"
         startScan()
     }
 
-    /** Flow 2: Chọn ảnh có QR → decode QR → upload chính ảnh đó → điểm danh. */
+    /** Flow 2: Chọn ảnh có QR → decode → điểm danh. */
     private fun flowImageQr() {
         pendingFlow = PendingFlow.IMAGE_QR_SELF
-        pendingQr = null
         status.text = "Chọn ảnh có chứa QR sự kiện"
         pickImageLauncher.launch("image/*")
     }
 
-    /** Flow 3: Nhập mã điểm danh → upload ảnh xác thực → điểm danh. */
+    /** Flow 3: Nhập mã điểm danh → điểm danh. */
     private fun flowManual() {
         val input = EditText(this).apply {
-            hint = "Mã điểm danh (VD: 153591)"
+            hint = "Mã điểm danh (VD: 156485)"
             inputType = InputType.TYPE_CLASS_NUMBER
         }
         AlertDialog.Builder(this)
             .setTitle("Nhập mã điểm danh")
-            .setMessage("Nhập mã điểm danh hiển thị tại sự kiện. Sau đó chọn ảnh xác thực.")
+            .setMessage("Mã hiển thị tại sự kiện. App gốc chỉ cần mã này là đủ điểm danh.")
             .setView(input)
-            .setPositiveButton("Tiếp tục") { _, _ ->
+            .setPositiveButton("Điểm danh") { _, _ ->
                 val code = input.text.toString().trim()
                 if (code.isBlank()) {
                     status.text = "Chưa nhập mã"; return@setPositiveButton
                 }
-                pendingCode = code
-                pendingFlow = PendingFlow.MANUAL_THEN_PHOTO
-                status.text = "Đã nhập mã: $code\nBước 2/2: Chọn ảnh xác thực"
-                pickImageLauncher.launch("image/*")
+                doCheckInWithMa(code)
             }
             .setNegativeButton("Huỷ", null)
             .show()
     }
 
-    // ========== UPLOAD + ĐIỂM DANH ==========
-
-    /** Đọc ảnh → decode QR từ bitmap → upload → checkin. Dùng cho flow 2. */
-    private fun decodeQrThenUploadAndCheckin(uri: Uri) {
+    // ========== Decode QR từ ảnh rồi điểm danh ==========
+    private fun decodeQrThenCheckin(uri: Uri) {
         status.text = "Đang đọc ảnh và giải mã QR…"
         try {
-            val resolver = contentResolver
-            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
             if (bytes == null || bytes.isEmpty()) { status.text = "Không đọc được ảnh"; return }
-
             val decodedQr = decodeQrFromBytes(bytes)
             if (decodedQr == null) {
-                status.text = "❌ Không tìm thấy QR trong ảnh.\n" +
-                        "Thử ảnh chụp QR rõ nét hơn, hoặc dùng flow 'Nhập mã điểm danh'."
+                status.text = "❌ Không tìm thấy QR trong ảnh.\nThử ảnh rõ hơn hoặc dùng 'Nhập mã điểm danh'."
                 return
             }
-
-            val parsed = QrParser.parse(decodedQr)
-            if (parsed == null || parsed.module != "SU_KIEN" || parsed.action != "CHECK_IN") {
-                status.text = "QR trong ảnh không phải sự kiện CHECK_IN:\n$decodedQr"
-                return
-            }
-            val ma = try { JSONObject(parsed.data).optString("maDiemDanh") }
-                     catch (_: Exception) { "" }
-            if (ma.isBlank()) { status.text = "QR thiếu maDiemDanh:\n$decodedQr"; return }
-
-            status.text = "✅ Đã giải mã QR\nma=$ma\nBước 1/2: Đang upload ảnh…"
-            uploadBytesAndCheckin(resolver, uri, bytes, ma)
+            doCheckIn(decodedQr)
         } catch (e: Exception) {
-            status.text = "Lỗi: ${e.message}"
+            status.text = "Lỗi đọc ảnh: ${e.message}"
         }
     }
 
-    /** Upload ảnh từ Uri rồi gọi checkin với ma đã biết. */
-    private fun uploadAndCheckin(uri: Uri, ma: String) {
-        status.text = "Bước 1/2: Đang đọc ảnh…"
-        try {
-            val resolver = contentResolver
-            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
-            if (bytes == null || bytes.isEmpty()) { status.text = "Không đọc được ảnh"; return }
-            uploadBytesAndCheckin(resolver, uri, bytes, ma)
-        } catch (e: Exception) { status.text = "Lỗi đọc ảnh: ${e.message}" }
-    }
-
-    private fun uploadBytesAndCheckin(
-        resolver: android.content.ContentResolver, uri: Uri, bytes: ByteArray, ma: String
-    ) {
-        var displayName = "image.jpg"
-        val mime = resolver.getType(uri) ?: "image/jpeg"
-        resolver.query(uri, null, null, null, null)?.use { c ->
-            if (c.moveToFirst()) {
-                val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (idx >= 0) displayName = c.getString(idx) ?: displayName
-            }
-        }
-
-        status.text = "Bước 1/2: Upload ảnh (${bytes.size / 1024} KB)…"
-        val url = Config.API_URL.trimEnd('/') + "/slink/file"
-        val headers = authHeaders().toMutableMap().apply { remove("Content-Type") }
-
-        Api.uploadFile(url, bytes, displayName, mime, headers, "file") { ok, resp ->
+    // ========== ĐIỂM DANH — đúng flow gốc: chỉ {ma, loaiQR} ==========
+    private fun doCheckInWithMa(ma: String) {
+        val body = JSONObject()
+            .put("ma", ma)
+            .put("loaiQR", "Tham gia")
+            .toString()
+        status.text = "Đang check-in sự kiện…\nma=$ma"
+        postWithAuth("/slink/sv-su-kien/qr", body) { ok, resp ->
             runOnUiThread {
-                if (!ok) { status.text = "❌ Upload thất bại\n$resp"; return@runOnUiThread }
-                val fileId = try {
-                    JSONObject(resp).getJSONObject("data").getJSONObject("file").getString("_id")
-                } catch (_: Exception) { "" }
-                if (fileId.isBlank()) {
-                    status.text = "Upload OK nhưng không lấy được fileId\n$resp"
-                    return@runOnUiThread
-                }
-                session.lastUploadedFileId = fileId
-                status.text = "Upload OK (fileId=$fileId)\nBước 2/2: Đang điểm danh…"
-
-                val body = JSONObject()
-                    .put("ma", ma)
-                    .put("loaiQR", "Tham gia")
-                    .put("fileId", fileId)
-                    .toString()
-                postWithAuth("/slink/sv-su-kien/qr", body) { ok2, resp2 ->
-                    runOnUiThread {
-                        if (ok2) {
-                            status.text = "✅ Điểm danh thành công\n$resp2"
-                            session.lastUploadedFileId = ""
-                        } else {
-                            status.text = "❌ Lỗi điểm danh: $resp2\nma=$ma\nfileId=$fileId"
-                        }
-                    }
-                }
+                if (ok) status.text = "✅ Điểm danh thành công\n$resp"
+                else status.text = "❌ Lỗi: $resp\n\nma=$ma"
             }
         }
-    }
-
-    // ========== Decode QR từ bitmap ==========
-    private fun decodeQrFromBytes(bytes: ByteArray): String? {
-        return try {
-            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
-            val w = bmp.width; val h = bmp.height
-            val pixels = IntArray(w * h)
-            bmp.getPixels(pixels, 0, w, 0, 0, w, h)
-            val source = RGBLuminanceSource(w, h, pixels)
-            val binary = BinaryBitmap(HybridBinarizer(source))
-            MultiFormatReader().decode(binary).text
-        } catch (_: Exception) { null }
-    }
-
-    // ========== Quét QR không ảnh ==========
-    private fun startScan() {
-        val o = ScanOptions()
-        o.setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-        o.setPrompt("Đưa QR điểm danh vào khung")
-        o.setBeepEnabled(false); o.setOrientationLocked(false)
-        scanLauncher.launch(o)
     }
 
     private fun doCheckIn(qr: String) {
@@ -584,14 +461,7 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val ma = JSONObject(parsed.data).optString("maDiemDanh")
                     if (ma.isBlank()) { status.text = "QR thiếu maDiemDanh"; return }
-                    val body = JSONObject().put("ma", ma).put("loaiQR", "Tham gia").toString()
-                    status.text = "Đang check-in sự kiện (không ảnh)…\nma=$ma"
-                    postWithAuth("/slink/sv-su-kien/qr", body) { ok, resp ->
-                        runOnUiThread {
-                            if (ok) status.text = "✅ Check-in thành công\n$resp"
-                            else status.text = "❌ Lỗi: $resp\n\nQR: $qr"
-                        }
-                    }
+                    doCheckInWithMa(ma)
                 } catch (e: Exception) { status.text = "Parse QR lỗi: ${e.message}" }
             }
             parsed.action.contains("DIEM_DANH", true) -> {
@@ -611,6 +481,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ========== Quét QR thường ==========
+    private fun startScan() {
+        val o = ScanOptions()
+        o.setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+        o.setPrompt("Đưa QR điểm danh vào khung")
+        o.setBeepEnabled(false); o.setOrientationLocked(false)
+        scanLauncher.launch(o)
+    }
+
+    // ========== Decode QR từ bitmap ==========
+    private fun decodeQrFromBytes(bytes: ByteArray): String? {
+        return try {
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            val w = bmp.width; val h = bmp.height
+            val pixels = IntArray(w * h)
+            bmp.getPixels(pixels, 0, w, 0, 0, w, h)
+            val source = RGBLuminanceSource(w, h, pixels)
+            val binary = BinaryBitmap(HybridBinarizer(source))
+            MultiFormatReader().decode(binary).text
+        } catch (_: Exception) { null }
+    }
+
     private fun extractMaNhomQr(data: String): String {
         try {
             val o = JSONObject(data)
@@ -625,7 +517,7 @@ class MainActivity : AppCompatActivity() {
         return data
     }
 
-    // ========== Upload ảnh không điểm danh ==========
+    // ========== Upload ảnh không điểm danh (utility) ==========
     private fun doUploadOnly(uri: Uri) {
         uploadResult.text = "Đang đọc ảnh…"
         try {

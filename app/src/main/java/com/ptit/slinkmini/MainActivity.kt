@@ -1,8 +1,12 @@
 package com.ptit.slinkmini
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.text.InputType
 import android.view.View
 import android.widget.*
@@ -24,9 +28,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var manualQr: EditText
     private lateinit var partIn: EditText
     private lateinit var tokenIn: EditText
+    private lateinit var uploadResult: TextView
+
+    // ====== Cấu hình mặc định gửi kèm request (mô phỏng app gốc) ======
+    // Đọc từ strings.xml của app gốc
+    private val appVersionName = "2.3.6"
+    private val appVersionCode = "80064"
 
     private val scanLauncher = registerForActivityResult(ScanContract()) { r ->
         r.contents?.let { doCheckIn(it) }
+    }
+
+    private val pickImageLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { doUploadImage(it) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,14 +59,14 @@ class MainActivity : AppCompatActivity() {
         intent?.let { handleIntent(it) }
     }
 
-    // ==================== Deep link callback ====================
+    // ==================== Deep link SSO ====================
     private fun handleIntent(intent: Intent) {
         val data = intent.data ?: return
         if (data.scheme == "ptit.auth" && data.host == "SignIn") {
-            val code       = data.getQueryParameter("code")
-            val state      = data.getQueryParameter("state")
-            val error      = data.getQueryParameter("error")
-            val errorDesc  = data.getQueryParameter("error_description")
+            val code      = data.getQueryParameter("code")
+            val state     = data.getQueryParameter("state")
+            val error     = data.getQueryParameter("error")
+            val errorDesc = data.getQueryParameter("error_description")
 
             if (error != null) {
                 status.text = "SSO lỗi: $error\n${errorDesc.orEmpty()}"; return
@@ -59,7 +75,7 @@ class MainActivity : AppCompatActivity() {
                 status.text = "Không nhận được code từ SSO"; return
             }
             if (state != session.pendingState) {
-                status.text = "State mismatch — bắt đầu đăng nhập lại"; return
+                status.text = "State mismatch — thử đăng nhập lại"; return
             }
             exchangeCodeForToken(code)
         }
@@ -70,13 +86,13 @@ class MainActivity : AppCompatActivity() {
         val scroll = ScrollView(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(56, 96, 56, 56)
+            setPadding(48, 96, 48, 48)
         }
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
             text = "PTIT S-Link Mini"; textSize = 22f
-            setPadding(0, 0, 0, 32)
+            setPadding(0, 0, 0, 24)
         })
 
         // --- Login ---
@@ -86,7 +102,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { startSso() }
         })
         loginBox.addView(Button(this).apply {
-            text = "Đã có token — dán vào Settings"
+            text = "Đã có token — mở Settings"
             setOnClickListener { showSettings() }
         })
         root.addView(loginBox)
@@ -101,16 +117,37 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 16)
         })
         homeBox.addView(Button(this).apply {
-            text = "Quét QR"
+            text = "Quét QR điểm danh"
             setOnClickListener { startScan() }
         })
         manualQr = EditText(this).apply { hint = "Dán chuỗi QR (dự phòng)" }
         homeBox.addView(manualQr)
         homeBox.addView(Button(this).apply {
-            text = "Điểm danh"
+            text = "Điểm danh từ chuỗi QR"
             setOnClickListener {
                 val s = manualQr.text.toString().trim()
                 if (s.isNotEmpty()) doCheckIn(s)
+            }
+        })
+        homeBox.addView(Button(this).apply {
+            text = "📷 Upload ảnh"
+            setOnClickListener { pickImageLauncher.launch("image/*") }
+        })
+        uploadResult = TextView(this).apply {
+            textSize = 12f
+            setTextIsSelectable(true)
+            setPadding(0, 8, 0, 8)
+        }
+        homeBox.addView(uploadResult)
+        homeBox.addView(Button(this).apply {
+            text = "Copy kết quả upload"
+            setOnClickListener {
+                val t = uploadResult.text.toString()
+                if (t.isNotBlank()) {
+                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText("upload", t))
+                    Toast.makeText(this@MainActivity, "Đã copy", Toast.LENGTH_SHORT).show()
+                }
             }
         })
         homeBox.addView(Button(this).apply {
@@ -156,8 +193,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(settingsBox)
 
         status = TextView(this).apply {
-            textSize = 13f
-            setPadding(0, 24, 0, 0)
+            textSize = 12f
+            setPadding(0, 20, 0, 0)
             setTextIsSelectable(true)
         }
         root.addView(status)
@@ -181,7 +218,7 @@ class MainActivity : AppCompatActivity() {
         partIn.setText(session.partitionCode)
     }
 
-    // ==================== SSO (PKCE) ====================
+    // ==================== SSO PKCE ====================
     private fun startSso() {
         val verifier  = Pkce.newCodeVerifier()
         val challenge = Pkce.challenge(verifier)
@@ -210,7 +247,7 @@ class MainActivity : AppCompatActivity() {
     private fun exchangeCodeForToken(code: String) {
         val verifier = session.pendingVerifier
         if (verifier.isBlank()) {
-            status.text = "Không có code_verifier — bắt đầu lại"; return
+            status.text = "Không có code_verifier — thử lại"; return
         }
         status.text = "Đang đổi code lấy token…"
         val form = mapOf(
@@ -238,7 +275,7 @@ class MainActivity : AppCompatActivity() {
                     refreshUi()
                     preparePartition()
                 } catch (e: Exception) {
-                    status.text = "Parse token thất bại: ${e.message}\n$body"
+                    status.text = "Parse token lỗi: ${e.message}\n$body"
                 }
             }
         }
@@ -267,12 +304,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== Partition code ====================
+    // ==================== Partition ====================
     private fun preparePartition() {
         val fromJwt = partitionFromJwt()
-        if (fromJwt.isNotBlank()) {
-            session.partitionCode = fromJwt; return
-        }
+        if (fromJwt.isNotBlank()) { session.partitionCode = fromJwt; return }
         getWithAuth("/core/data-partition/user/many/me") { ok, body ->
             if (ok) {
                 try {
@@ -291,10 +326,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun partitionFromJwt(): String {
-        return try {
-            val parts = session.accessToken.split(".")
-            if (parts.size < 2) return ""
+    private fun partitionFromJwt(): String = try {
+        val parts = session.accessToken.split(".")
+        if (parts.size < 2) "" else {
             val payload = String(android.util.Base64.decode(
                 parts[1],
                 android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP
@@ -308,21 +342,35 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-        } catch (_: Exception) { "" }
-    }
+        }
+    } catch (_: Exception) { "" }
 
-    // ==================== Auth-aware requests ====================
+    // ==================== Headers có version ====================
     private fun authHeaders(): Map<String, String> {
         val h = mutableMapOf(
-            "Authorization" to "Bearer ${session.accessToken}",
-            "Content-Type"  to "application/json",
-            "Accept"        to "application/json"
+            "Authorization"   to "Bearer ${session.accessToken}",
+            "Content-Type"    to "application/json",
+            "Accept"          to "application/json",
+            "Accept-Language" to "vi-VN,vi;q=0.9,en;q=0.8",
+
+            // ==== Shotgun version headers ====
+            "X-App-Version"    to appVersionName,
+            "X-Client-Version" to appVersionName,
+            "X-Version"        to appVersionName,
+            "App-Version"      to appVersionName,
+            "X-App-VersionCode" to appVersionCode,
+            "X-Client-VersionCode" to appVersionCode,
+            "X-App-Platform"   to "android",
+            "X-Platform"       to "android",
+            "X-Client-Id"      to Config.CLIENT_ID,
+            "User-Agent"       to "PTIT-S-Link/$appVersionName (Android; $appVersionCode)"
         )
         if (session.partitionCode.isNotBlank())
             h["x-data-partition-code"] = session.partitionCode
         return h
     }
 
+    // ==================== Auth-aware requests ====================
     private fun getWithAuth(path: String, onResult: (Boolean, String) -> Unit) =
         requestWithAuth("GET", path, null, onResult)
 
@@ -349,7 +397,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== QR scan / check-in ====================
+    // ==================== QR scan ====================
     private fun startScan() {
         val o = ScanOptions()
         o.setDesiredBarcodeFormats(ScanOptions.QR_CODE)
@@ -361,14 +409,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun doCheckIn(qr: String) {
         val parsed = QrParser.parse(qr)
-        if (parsed == null) {
-            status.text = "QR không hợp lệ:\n$qr"; return
-        }
+        if (parsed == null) { status.text = "QR không hợp lệ:\n$qr"; return }
 
         status.text = "Đang xử lý: ${parsed.module}|${parsed.action}"
 
         when {
-            // ---- Sự kiện: POST /slink/sv-su-kien/qr ----
+            // Sự kiện
             parsed.module == "SU_KIEN" && parsed.action == "CHECK_IN" -> {
                 try {
                     val j = JSONObject(parsed.data)
@@ -388,11 +434,11 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 } catch (e: Exception) {
-                    status.text = "Parse JSON từ QR thất bại: ${e.message}\n${parsed.data}"
+                    status.text = "Parse JSON QR thất bại: ${e.message}\n${parsed.data}"
                 }
             }
 
-            // ---- Lớp: POST /qldt/diem-danh/user/qr ----
+            // Lớp
             parsed.action.contains("DIEM_DANH", true) -> {
                 val otp = parsed.otp.orEmpty().trim()
                 if (otp.isBlank()) {
@@ -412,7 +458,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            else -> status.text = "Chưa hỗ trợ module: ${parsed.module}|${parsed.action}\nQR: $qr"
+            else -> status.text = "Chưa hỗ trợ module: ${parsed.module}|${parsed.action}\n$qr"
         }
     }
 
@@ -429,5 +475,42 @@ class MainActivity : AppCompatActivity() {
             if (o.has("maNhomQr")) return o.getString("maNhomQr")
         } catch (_: Exception) {}
         return data
+    }
+
+    // ==================== Upload ảnh ====================
+    private fun doUploadImage(uri: Uri) {
+        uploadResult.text = "Đang đọc ảnh…"
+        try {
+            val resolver = contentResolver
+            // Lấy tên file và mime
+            var displayName = "image.jpg"
+            var mime = resolver.getType(uri) ?: "image/jpeg"
+            resolver.query(uri, null, null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) displayName = c.getString(idx) ?: displayName
+                }
+            }
+            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+            if (bytes == null || bytes.isEmpty()) {
+                uploadResult.text = "Không đọc được file ảnh"; return
+            }
+            uploadResult.text = "Đang upload ${bytes.size / 1024} KB…"
+
+            val url = Config.API_URL.trimEnd('/') + "/slink/file"
+            // Header không có Content-Type vì multipart tự set
+            val headers = authHeaders().toMutableMap().apply { remove("Content-Type") }
+
+            Api.uploadFile(url, bytes, displayName, mime, headers,
+                fieldName = "file"
+            ) { ok, resp ->
+                runOnUiThread {
+                    if (ok) uploadResult.text = "✅ Upload OK\n$resp"
+                    else uploadResult.text = "❌ Upload lỗi\n$resp"
+                }
+            }
+        } catch (e: Exception) {
+            uploadResult.text = "Lỗi đọc/upload: ${e.message}"
+        }
     }
 }

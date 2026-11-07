@@ -1,7 +1,8 @@
-package com.ptit.slinkmini
+package com.ppt.slinkmini
 
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -11,7 +12,8 @@ object Api {
 
     val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)   // upload ảnh có thể lâu
+        .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
     fun postForm(url: String, form: Map<String, String>,
@@ -34,6 +36,31 @@ object Api {
     fun get(url: String, headers: Map<String, String>,
             onResult: (Boolean, String) -> Unit) {
         val req = Request.Builder().url(url).get()
+            .apply { headers.forEach { (k, v) -> addHeader(k, v) } }
+            .build()
+        client.newCall(req).enqueue(cb(onResult))
+    }
+
+    /**
+     * Upload multipart. Field name mặc định "file".
+     * Một số backend còn nhận "files" hoặc "upload" — có thể đổi tham số.
+     */
+    fun uploadFile(
+        url: String,
+        bytes: ByteArray,
+        filename: String,
+        mime: String,
+        headers: Map<String, String>,
+        fieldName: String = "file",
+        onResult: (Boolean, String) -> Unit
+    ) {
+        val fileBody = bytes.toRequestBody(mime.toMediaTypeOrNull())
+        val multipart = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(fieldName, filename, fileBody)
+            .build()
+        val req = Request.Builder().url(url)
+            .post(multipart)
             .apply { headers.forEach { (k, v) -> addHeader(k, v) } }
             .build()
         client.newCall(req).enqueue(cb(onResult))

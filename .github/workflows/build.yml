@@ -1,11 +1,14 @@
 name: Build APK
 on:
-  push: { branches: [ main ] }
+  push:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pin runner để tránh notice ubuntu-latest migration
+    runs-on: ubuntu-24.04
+
     steps:
       - uses: actions/checkout@v5
 
@@ -14,9 +17,8 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # setup-android: dùng bản mới nhất (v3 hiện đang là bản stable,
-      # nhưng được maintain; nếu GitHub ra v4 thì chỉ cần đổi @v4)
-      - uses: android-actions/setup-android@v3
+      # Nâng cấp lên v4 để hết warning Node 20
+      - uses: android-actions/setup-android@v4
 
       - name: Install SDK components
         run: |
